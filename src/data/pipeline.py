@@ -7,6 +7,7 @@ import pandas as pd
 from .config import DataConfig, load_config
 from .io import atomic_write_parquet, read_side_directory, read_side_files
 from .validation import data_quality_summary, validate_side_frame, write_quality_report
+from .market_hours import filter_market_closed
 
 
 def deduplicate(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -50,7 +51,9 @@ def load_validate_merge(config: DataConfig) -> tuple[pd.DataFrame, object, objec
 def build_master(project_root: Path | str | None = None) -> pd.DataFrame:
     config = load_config(project_root)
     merged, bid_report, ask_report, errors = load_validate_merge(config)
+    merged, excluded_closed = filter_market_closed(merged)
     summary = data_quality_summary(merged, bid_report, ask_report, errors)
+    summary["excluded_market_closed_rows"] = excluded_closed
     write_quality_report(summary, config.path(config.quality_report_path))
     atomic_write_parquet(merged.drop(columns=["_merge", "_source_file_x", "_source_file_y"], errors="ignore"), config.path(config.master_path))
     return summary
@@ -71,7 +74,10 @@ def update_history(project_root: Path | str | None = None) -> pd.DataFrame:
     latest_month = pd.Timestamp(year=latest.year, month=latest.month, day=1, tz="UTC")
     start = latest_month - pd.DateOffset(months=config.incremental_overlap_months)
     manager = DownloadManager(config)
-    manager.download_range(start.date(), pd.Timestamp.now(tz="UTC").date(), allow_skip=False)
+    try:
+        manager.download_range(start.date(), pd.Timestamp.now(tz="UTC").date(), allow_skip=False)
+    finally:
+        manager.close()
 
     months = pd.date_range(start.normalize(), pd.Timestamp.now(tz="UTC").normalize(), freq="MS")
     bid_paths = [config.path(config.raw_bid_dir) / f"xauusd_bid_m1_{month:%Y_%m}.csv" for month in months]
@@ -82,6 +88,7 @@ def update_history(project_root: Path | str | None = None) -> pd.DataFrame:
         raise RuntimeError("Incremental download produced no usable paired BID/ASK data")
     recent = merge_bid_ask(bid, ask)
     recent = recent[recent["datetime_utc"] >= start]
+    recent, excluded_closed = filter_market_closed(recent)
     preserved = master[pd.to_datetime(master["datetime_utc"], utc=True) < start]
     clean_recent = recent.drop(columns=["_merge", "_source_file_x", "_source_file_y"], errors="ignore")
     updated = pd.concat([preserved, clean_recent], ignore_index=True).sort_values("timestamp").drop_duplicates("timestamp", keep="last")
@@ -89,5 +96,6 @@ def update_history(project_root: Path | str | None = None) -> pd.DataFrame:
     bid_report = validate_side_frame(updated, "bid")
     ask_report = validate_side_frame(updated, "ask")
     summary = data_quality_summary(updated, bid_report, ask_report, [*bid_errors, *ask_errors])
+    summary["excluded_market_closed_rows"] = excluded_closed
     write_quality_report(summary, config.path(config.quality_report_path))
     return summary

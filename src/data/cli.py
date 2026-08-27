@@ -18,19 +18,32 @@ def main() -> int:
     full = subparsers.add_parser("download-full", help="Download full monthly BID/ASK history")
     full.add_argument("--start", type=date.fromisoformat, default=date(2003, 5, 5))
     full.add_argument("--end", type=date.fromisoformat, default=datetime.now(timezone.utc).date())
+    full.add_argument("--newest-first", action="store_true", help="Process current/recent months first")
     subparsers.add_parser("update", help="Incrementally update an existing master")
-    subparsers.add_parser("build-master", help="Validate all raw files and write master Parquet")
+    master = subparsers.add_parser("build-master", help="Validate paired monthly files and write master Parquet")
+    master.add_argument("--start", type=date.fromisoformat)
+    master.add_argument("--end", type=date.fromisoformat)
     subparsers.add_parser("validate", help="Validate and merge raw files without writing Parquet")
     args = parser.parse_args()
     config = load_config(args.project_root)
 
     if args.command == "download-full":
-        DownloadManager(config).download_range(args.start, args.end, allow_skip=True)
+        manager = DownloadManager(config)
+        try:
+            manager.download_range(args.start, args.end, allow_skip=True, newest_first=args.newest_first)
+        finally:
+            manager.close()
         return 0
     if args.command == "update":
         summary = update_history(args.project_root)
     elif args.command == "build-master":
-        summary = build_master(args.project_root)
+        if args.start and args.end:
+            from .snapshot import build_master_snapshot
+            summary = build_master_snapshot(args.project_root, args.start, args.end)
+        elif args.start or args.end:
+            parser.error("build-master requires both --start and --end")
+        else:
+            summary = build_master(args.project_root)
     else:
         merged, bid, ask, errors = load_validate_merge(config)
         summary = data_quality_summary(merged, bid, ask, errors)

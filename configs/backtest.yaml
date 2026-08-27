@@ -1,3 +1,12 @@
-# Phase 4 placeholder. Backtesting is intentionally not implemented in Phase 1.
-enabled: false
+enabled: true
+starting_capital: 100000
+position_size_units: 1.0
+leverage: 20.0
+commission_per_unit_per_side: 0.0
+slippage_price_per_side: 0.05
+stop_loss_price: 5.0
+take_profit_price: 10.0
+max_holding_minutes: 30
+annualization_periods: 362880
+conservative_same_bar_stop_first: true
 

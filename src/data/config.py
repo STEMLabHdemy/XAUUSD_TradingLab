@@ -18,7 +18,9 @@ class DataConfig:
     download_log_path: str = "logs/download_history.log"
     incremental_overlap_months: int = 1
     download_retries: int = 3
-    retry_delay_seconds: int = 10
+    retry_delay_seconds: int = 30
+    rate_limit_delay_seconds: int = 90
+    request_pause_seconds: int = 2
 
     def path(self, relative: str) -> Path:
         return self.project_root / relative

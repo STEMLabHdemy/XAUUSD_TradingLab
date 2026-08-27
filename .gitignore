@@ -1,0 +1,31 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local secrets
+.env
+.streamlit/secrets.toml
+
+# Dukascopy cache and generated logs
+.dukascopy-cache/
+logs/
+
+# Market data and generated feature stores
+data/raw/
+data/processed/
+data/yearly/
+data/features/
+data/live/
+
+# Generated model and research artifacts
+models/*.joblib
+models/*provisional*
+results/
+reports/*.csv
+
+# Temporary files
+*.tmp
+*.tmp.parquet

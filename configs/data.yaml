@@ -9,6 +9,7 @@ quality_report_path: reports/data_quality_report.csv
 download_log_path: logs/download_history.log
 incremental_overlap_months: 1
 download_retries: 3
-retry_delay_seconds: 10
+retry_delay_seconds: 30
+rate_limit_delay_seconds: 90
+request_pause_seconds: 2
 auto_update_historical_on_startup: true
-

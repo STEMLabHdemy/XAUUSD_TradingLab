@@ -1,3 +1,13 @@
-# Phase 2 placeholder. Feature definitions are intentionally not implemented in Phase 1.
-enabled: false
-
+price_column: mid_close
+return_horizons: [1, 2, 3, 5, 10, 15, 30, 60]
+atr_windows: [5, 15, 30, 60]
+volatility_windows: [5, 15, 30, 60]
+ema_windows: [5, 10, 20, 50, 100, 200]
+rsi_window: 14
+macd_fast: 12
+macd_slow: 26
+macd_signal: 9
+bollinger_window: 20
+bollinger_std: 2.0
+spread_window: 60
+warmup_rows: 200

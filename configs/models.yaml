@@ -1,3 +1,16 @@
-# Phase 3 placeholder. Model training is intentionally not implemented in Phase 1.
-enabled: false
-
+enabled_models: [logistic_regression, lightgbm, xgboost]
+random_state: 42
+logistic_regression:
+  C: 1.0
+  max_iter: 1000
+lightgbm:
+  n_estimators: 150
+  learning_rate: 0.05
+  num_leaves: 31
+  max_depth: -1
+xgboost:
+  n_estimators: 150
+  learning_rate: 0.05
+  max_depth: 6
+  subsample: 0.8
+  colsample_bytree: 0.8

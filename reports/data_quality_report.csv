@@ -1,2 +1,0 @@
-earliest_candle,latest_candle,number_of_candles,number_of_years,duplicates,missing_bid_timestamps,missing_ask_timestamps,invalid_ohlc_rows,nan_ohlc_rows,negative_or_zero_price_rows,negative_spreads,extreme_spreads,median_spread,spread_p95,spread_p99,max_spread,min_price,max_price,unexpected_gaps,weekend_gaps,weekday_gaps,corrupt_files
-2026-08-20 00:00:00+00:00,2026-08-20 23:58:00+00:00,1439,0.002734048216594418,0,0,0,0,0,0,0,62,0.5900000000001455,1.161000000000694,4.789999999999964,4.789999999999964,4450.365,4541.635,0,0,0,0

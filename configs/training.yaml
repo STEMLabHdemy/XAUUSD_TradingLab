@@ -1,3 +1,11 @@
-# Phase 3 placeholder. Time-series training is intentionally not implemented in Phase 1.
-enabled: false
+forecast_horizon_minutes: 5
+training_windows_years: [3, 5, 10, 15, all]
+walk_forward_mode: expanding
+initial_train_fraction: 0.50
+test_fraction: 0.10
+untouched_oos_fraction: 0.20
+calibration_fraction: 0.15
+calibration_methods: [sigmoid, isotonic]
+purge_gap_minutes: 60
+random_shuffle: false
 

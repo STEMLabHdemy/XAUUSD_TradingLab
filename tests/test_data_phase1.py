@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import shutil
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from src.data.io import atomic_write_parquet, read_side_csv
+from src.data.config import DataConfig
+from src.data.download import DownloadManager
 from src.data.pipeline import deduplicate, merge_bid_ask, update_history
 from src.data.validation import data_quality_summary, validate_side_frame
 
@@ -81,6 +85,36 @@ class DataPhase1Tests(unittest.TestCase):
         report = validate_side_frame(gapped, "bid")
         self.assertEqual(report.unexpected_gaps, 1)
         self.assertEqual(report.weekday_gaps, 1)
+
+    def test_existing_dukascopy_filename_is_adopted_without_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bid_dir = root / "data/raw/bid"
+            bid_dir.mkdir(parents=True)
+            legacy = bid_dir / "xauusd-m1-bid-2026-08-20-2026-08-21.csv"
+            shutil.copy2(BID_SAMPLE, legacy)
+            manager = DownloadManager(DataConfig(project_root=root))
+            manager._download_side("bid", date(2026, 8, 20), date(2026, 8, 21), allow_skip=True)
+            canonical = bid_dir / "xauusd_bid_m1_2026_08.csv"
+            self.assertTrue(legacy.exists())
+            self.assertTrue(canonical.exists())
+            manager.close()
+
+    def test_download_order_can_run_newest_first(self) -> None:
+        class RecordingManager(DownloadManager):
+            def __init__(self, config: DataConfig):
+                super().__init__(config)
+                self.calls: list[tuple[str, date, date]] = []
+
+            def _download_side(self, side: str, start: date, end: date, allow_skip: bool) -> None:
+                self.calls.append((side, start, end))
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = RecordingManager(DataConfig(project_root=Path(directory), request_pause_seconds=0))
+            manager.download_range(date(2026, 6, 1), date(2026, 8, 27), newest_first=True)
+            self.assertEqual(manager.calls[0], ("bid", date(2026, 8, 1), date(2026, 8, 27)))
+            self.assertEqual(manager.calls[-1], ("ask", date(2026, 6, 1), date(2026, 7, 1)))
+            manager.close()
 
 
 if __name__ == "__main__":

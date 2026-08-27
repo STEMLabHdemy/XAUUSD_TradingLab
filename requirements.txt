@@ -1,4 +1,9 @@
 pandas>=3.0
 pyarrow>=18.0
 PyYAML>=6.0
-
+scikit-learn>=1.8
+joblib>=1.4
+xgboost>=3.0
+lightgbm>=4.0
+streamlit>=1.50
+plotly>=6.0
