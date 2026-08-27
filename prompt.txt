@@ -1,0 +1,1494 @@
+We are working inside the existing Windows project directory:
+
+XAUUSD_TradingLab
+
+IMPORTANT: inspect the existing directory before modifying anything.
+
+There is already a:
+
+data/
+
+directory and there are already successful test downloads of XAUUSD M1 BID and ASK from dukascopy-node.
+
+There is also:
+
+XAUUSD_M1_2003_2026_DOWNLOAD_MANIFEST.xlsx
+
+Do not delete existing test data.
+
+The test files prove that dukascopy-node works correctly on this Windows machine.
+
+==================================================
+PROJECT GOAL
+============
+
+Build a complete local quantitative research and realtime paper-trading platform for:
+
+XAUUSD — Gold / US Dollar
+
+Primary timeframe:
+
+M1
+
+The system must support:
+
+1. historical XAUUSD BID + ASK data;
+2. incremental historical dataset updates;
+3. Parquet master dataset;
+4. feature engineering;
+5. multi-horizon machine-learning predictions;
+6. several ML models;
+7. walk-forward validation;
+8. realistic BID/ASK backtesting;
+9. signal aggregation;
+10. BUY / SELL / HOLD / EXIT / NO_TRADE;
+11. configurable virtual accounts;
+12. live realtime inference using MetaTrader 5;
+13. realtime paper trading;
+14. an interactive graphical trading terminal;
+15. comparison of different models and strategies.
+
+THIS IS NOT A TOY NOTEBOOK.
+
+Build a modular Python application.
+
+==================================================
+VERY IMPORTANT: MEANING OF LIVE
+===============================
+
+LIVE means REALTIME.
+
+It does NOT mean historical replay.
+
+When the user selects:
+
+LIVE PAPER
+
+the application must connect to MetaTrader 5 and consume current realtime XAUUSD market data.
+
+When a new completed M1 candle arrives, the system must immediately:
+
+receive the new candle
+update features
+perform model inference
+calculate probabilities
+aggregate signals
+make a strategy decision
+update the paper trading account
+update the realtime chart
+
+Signals must therefore correspond to the market happening RIGHT NOW.
+
+Historical replay may exist as a separate optional feature, but NEVER call replay "live".
+
+==================================================
+HISTORICAL DATA SOURCE
+======================
+
+Historical source:
+
+Dukascopy
+
+Instrument:
+
+XAUUSD
+
+Timeframe:
+
+M1
+
+Price sides:
+
+BID + ASK
+
+Earliest useful M1 history:
+
+approximately:
+
+2003-05-05 UTC
+
+The user has already successfully tested these commands manually:
+
+npx dukascopy-node -i xauusd -from YYYY-MM-DD -to YYYY-MM-DD -t m1 -p bid -f csv -dir data/raw/bid
+
+and:
+
+npx dukascopy-node -i xauusd -from YYYY-MM-DD -to YYYY-MM-DD -t m1 -p ask -f csv -dir data/raw/ask
+
+dukascopy-node already works.
+
+==================================================
+CRITICAL DOWNLOAD RULE
+======================
+
+DO NOT automatically start downloading 23 years of data while implementing the project.
+
+Your job is to BUILD THE DOWNLOADER.
+
+The human user will explicitly launch the full historical download after the downloader has been created and tested.
+
+Do not waste implementation time waiting for the complete historical download.
+
+==================================================
+CREATE HISTORICAL DOWNLOADER
+============================
+
+Create:
+
+scripts/download_full_history.ps1
+
+It should download:
+
+2003-05 through the current month
+
+for:
+
+XAUUSD M1 BID
+XAUUSD M1 ASK
+
+Download month-by-month.
+
+Structure:
+
+data/
+raw/
+bid/
+ask/
+
+Use predictable filenames.
+
+For example:
+
+xauusd_bid_m1_2003_05.csv
+xauusd_ask_m1_2003_05.csv
+
+If dukascopy-node generates a different filename automatically, safely rename or normalize it after download.
+
+The script must:
+
+* create missing folders;
+* skip an already valid month;
+* allow restart;
+* retry failed months;
+* print progress;
+* maintain a download log;
+* NEVER delete valid historical files;
+* be safe to stop and restart.
+
+Create:
+
+logs/download_history.log
+
+The full historical download must only begin when the user explicitly runs:
+
+powershell -ExecutionPolicy Bypass -File .\scripts\download_full_history.ps1
+
+Do not execute this automatically.
+
+==================================================
+INCREMENTAL DATA UPDATE
+=======================
+
+Create:
+
+scripts/update_history.ps1
+
+and a Python equivalent callable by the application.
+
+This is extremely important.
+
+Once the historical database exists, the application must NEVER redownload everything.
+
+At startup:
+
+1. inspect the latest local historical timestamp/month;
+2. determine what historical data is missing;
+3. download ONLY the missing/recent range;
+4. intentionally overlap a small recent period for robustness;
+5. deduplicate timestamps;
+6. replace/update only recent affected partitions;
+7. leave old validated history untouched.
+
+A reasonable approach is to redownload the current month and optionally the previous month, then deduplicate.
+
+Do not download 2003-present on every application startup.
+
+==================================================
+MASTER DATASET
+==============
+
+Create:
+
+data/processed/XAUUSD_M1_MASTER.parquet
+
+Use Parquet as the canonical historical dataset.
+
+NEVER use Excel as the machine-learning database.
+
+Expected canonical columns:
+
+timestamp
+datetime_utc
+
+open_bid
+high_bid
+low_bid
+close_bid
+
+open_ask
+high_ask
+low_ask
+close_ask
+
+spread_open
+spread_close
+
+mid_open
+mid_high
+mid_low
+mid_close
+
+Retain volume fields if available.
+
+Merge BID and ASK by timestamp.
+
+Do not silently remove unmatched rows.
+
+Report them.
+
+==================================================
+HISTORICAL VALIDATION
+=====================
+
+Create a comprehensive validator.
+
+Check:
+
+timestamps
+UTC
+duplicates
+NaNs
+missing BID
+missing ASK
+invalid OHLC
+negative/zero prices
+negative spreads
+extreme spreads
+unexpected gaps
+weekend gaps
+weekday gaps
+corrupt files
+partial downloads
+
+OHLC requirements:
+
+high >= low
+high >= open
+high >= close
+
+low <= open
+low <= close
+
+Create:
+
+reports/data_quality_report.csv
+
+Show:
+
+earliest candle
+latest candle
+number of candles
+number of years
+duplicates
+missing BID timestamps
+missing ASK timestamps
+invalid OHLC rows
+median spread
+95th percentile spread
+99th percentile spread
+max spread
+min price
+max price
+
+Never fabricate missing candles.
+
+==================================================
+EXECUTION PRICES
+================
+
+Historical backtests must use realistic BID/ASK execution.
+
+LONG:
+
+entry = ASK
+exit = BID
+
+SHORT:
+
+entry = BID
+exit = ASK
+
+The spread is therefore naturally incorporated.
+
+Never use MID as execution price except for explicitly labelled diagnostics.
+
+MID can be used for predictive features.
+
+==================================================
+FEATURE ENGINE
+==============
+
+Create one central FeatureEngine used by:
+
+training
+historical testing
+realtime inference
+
+Absolutely no look-ahead bias.
+
+Features must include at minimum:
+
+returns:
+
+1m
+2m
+3m
+5m
+10m
+15m
+30m
+60m
+
+log returns
+
+candle:
+
+range
+body
+signed body
+upper wick
+lower wick
+body/range
+close position
+
+volatility:
+
+ATR 5
+ATR 15
+ATR 30
+ATR 60
+
+rolling volatility:
+
+5m
+15m
+30m
+60m
+
+momentum:
+
+RSI
+MACD
+MACD signal
+MACD histogram
+ROC
+momentum
+
+trend:
+
+EMA5
+EMA10
+EMA20
+EMA50
+EMA100
+EMA200
+
+Prefer normalized EMA distances rather than absolute prices.
+
+Bollinger:
+
+upper
+lower
+middle
+width
+normalized position
+
+spread:
+
+spread
+spread %
+spread / ATR
+spread z-score
+spread percentile
+
+time:
+
+hour
+minute
+weekday
+cyclical hour/minute encoding
+
+sessions:
+
+Asia
+London
+New York
+London/New York overlap
+
+regimes:
+
+trend regime
+volatility regime
+range regime
+
+==================================================
+PREDICTION TARGETS
+==================
+
+Create classification targets:
+
+up_1m
+up_3m
+up_5m
+up_10m
+up_15m
+up_30m
+up_60m
+
+Create regression targets:
+
+future_return_1m
+future_return_3m
+future_return_5m
+future_return_10m
+future_return_15m
+future_return_30m
+future_return_60m
+
+Later support:
+
+MFE
+MAE
+future volatility
+
+Also create optional:
+
+DOWN
+NEUTRAL
+UP
+
+targets.
+
+NEUTRAL should represent future moves too small to overcome transaction costs.
+
+==================================================
+MODELS
+======
+
+Start with:
+
+Logistic Regression
+Random Forest
+XGBoost
+LightGBM
+CatBoost
+
+Architecture must later allow:
+
+LSTM
+GRU
+TCN
+Temporal Transformer
+
+Do not start development with deep learning.
+
+Use a common model interface.
+
+==================================================
+MULTIPLE TRAINING WINDOWS
+=========================
+
+Compare:
+
+last 3 years
+last 5 years
+last 10 years
+last 15 years
+ALL history
+
+More historical data does not automatically mean better performance.
+
+Make training-window length configurable.
+
+==================================================
+WALK-FORWARD VALIDATION
+=======================
+
+NEVER randomly shuffle time-series train/test data.
+
+Implement:
+
+expanding walk-forward
+rolling walk-forward
+
+Scalers/preprocessors fit only on training data.
+
+Hyperparameter tuning must not touch final test data.
+
+Maintain a genuinely untouched out-of-sample period.
+
+==================================================
+PROBABILITY CALIBRATION
+=======================
+
+Models must produce probabilities.
+
+Evaluate:
+
+Brier score
+log loss
+calibration curves
+
+Support:
+
+sigmoid/Platt calibration
+isotonic calibration
+
+respecting temporal splits.
+
+==================================================
+SIGNAL AGGREGATION
+==================
+
+Inference can occur every completed minute.
+
+This DOES NOT mean a trade every minute.
+
+Create temporal probability smoothing.
+
+Initial candidate:
+
+score_t =
+
+0.40 * P[t]
+
+* 0.25 * P[t-1]
+* 0.15 * P[t-2]
+* 0.12 * P[t-3]
+* 0.08 * P[t-4]
+
+Also support:
+
+rolling mean
+EMA smoothing
+median
+voting
+
+==================================================
+MULTI-HORIZON AGGREGATION
+=========================
+
+Combine:
+
+P_up_1m
+P_up_3m
+P_up_5m
+P_up_10m
+P_up_15m
+P_up_30m
+
+Use configurable weights.
+
+Also support horizon agreement rules.
+
+==================================================
+NO-TRADE ZONE
+=============
+
+NO_TRADE is extremely important.
+
+Baseline candidate:
+
+score >= 0.68 -> potential BUY
+
+score <= 0.32 -> potential SELL
+
+otherwise:
+
+NO_TRADE
+
+Thresholds must be configurable.
+
+Test many thresholds.
+
+==================================================
+EXPECTED RETURN FILTER
+======================
+
+Do not trade based only on directional probability.
+
+Require optionally:
+
+expected movement
+
+>
+
+spread
+
+* commission
+* slippage
+* safety margin
+
+==================================================
+SIGNAL PERSISTENCE
+==================
+
+Support requiring:
+
+1
+2
+3
+4
+5
+
+consecutive aligned predictions before entering.
+
+==================================================
+COOLDOWN
+========
+
+Support entry cooldown:
+
+0
+1
+3
+5
+10
+15
+30 minutes
+
+==================================================
+MARKET REGIME FILTERS
+=====================
+
+Support:
+
+trend filters
+volatility filters
+session filters
+spread filters
+
+==================================================
+SIGNAL STATES
+=============
+
+Possible signals:
+
+BUY
+SELL
+HOLD
+EXIT
+NO_TRADE
+
+Maintain position state.
+
+Do not generate a new BUY every minute while already LONG.
+
+==================================================
+BACKTEST ENGINE
+===============
+
+Build realistic event-driven or efficient backtesting.
+
+If inference uses completed candle t:
+
+execution cannot use information unavailable before candle completion.
+
+Include:
+
+historical BID/ASK spread
+commission
+slippage
+position sizing
+leverage simulation
+stop loss
+take profit
+time exit
+probability exit
+signal reversal exit
+cooldown
+
+Store every trade.
+
+==================================================
+PERFORMANCE METRICS
+===================
+
+Calculate:
+
+Net PnL
+Total return
+Profit Factor
+Sharpe
+Sortino
+Max Drawdown
+Calmar
+Win Rate
+Average Winner
+Average Loser
+Payoff Ratio
+Expectancy
+Trades
+Trades/day
+Exposure
+Holding time
+Longest losing streak
+
+Break down results by:
+
+year
+month
+hour
+session
+volatility regime
+trend regime
+LONG/SHORT
+
+==================================================
+EXPERIMENT ENGINE
+=================
+
+Create an experiment system capable of testing many configurations.
+
+Variables:
+
+model
+training window
+forecast horizon
+BUY threshold
+SELL threshold
+smoothing
+persistence
+multi-horizon weights
+expected-return threshold
+market regime
+session
+cooldown
+SL
+TP
+holding time
+slippage
+commission
+
+Save results to:
+
+results/experiments.parquet
+
+Do not rank only by PnL.
+
+Evaluate:
+
+Sharpe
+drawdown
+Profit Factor
+expectancy
+trade count
+year-to-year stability
+walk-forward stability
+parameter robustness
+
+==================================================
+REALTIME DATA
+=============
+
+REALTIME MARKET DATA MUST COME FROM METATRADER 5.
+
+The user has an MT5 installation/account.
+
+Create:
+
+src/live/mt5_client.py
+
+The application must support broker-specific XAUUSD symbol names.
+
+On connection:
+
+discover/validate the configured symbol.
+
+Retrieve:
+
+latest BID
+latest ASK
+spread
+latest completed M1 bars
+
+Realtime inference should normally trigger once per COMPLETED M1 candle.
+
+Do not continuously infer hundreds of times on the unfinished candle.
+
+==================================================
+IMPORTANT: HISTORICAL VS REALTIME FEED
+======================================
+
+Historical model training initially uses Dukascopy.
+
+Realtime inference uses the user's MT5 broker feed.
+
+These feeds may differ slightly.
+
+Therefore:
+
+store feed/source metadata;
+
+measure/log differences where possible;
+
+keep all features normalized;
+
+do not assume exact Dukascopy and broker prices are identical.
+
+Design the architecture so that later we can optionally train using MT5 broker historical candles too.
+
+==================================================
+REALTIME PIPELINE
+=================
+
+When a new completed M1 candle is detected:
+
+MT5
+↓
+new completed M1 bar
+↓
+FeatureEngine
+↓
+trained models
+↓
+multi-horizon probabilities
+↓
+expected returns
+↓
+temporal smoothing
+↓
+multi-horizon aggregation
+↓
+regime filters
+↓
+cost filters
+↓
+SignalEngine
+↓
+BUY / SELL / HOLD / EXIT / NO_TRADE
+↓
+PaperAccount
+↓
+GUI update
+
+Target latency after candle completion should be low.
+
+==================================================
+PAPER TRADING
+=============
+
+Create a REALTIME paper-trading engine.
+
+Paper trading uses REAL MT5 market data but VIRTUAL MONEY.
+
+NO broker order must be sent.
+
+Default paper balance:
+
+100000
+
+Allow any positive balance.
+
+Examples:
+
+1000
+10000
+50000
+100000
+250000
+1000000
+
+Configurable:
+
+initial capital
+currency label
+leverage
+risk per trade
+position size
+commission
+slippage
+max daily trades
+max allowed spread
+SL
+TP
+max daily loss
+
+Maintain:
+
+balance
+equity
+realized PnL
+unrealized PnL
+free margin
+used margin
+exposure
+max drawdown
+current position
+trade history
+
+Provide:
+
+RESET PAPER ACCOUNT
+
+==================================================
+COMPARE MODELS IN REALTIME
+==========================
+
+Design the paper architecture so different models/strategies can be compared.
+
+Eventually allow something such as:
+
+Paper Account A
+LightGBM
+€100,000
+
+Paper Account B
+XGBoost
+€100,000
+
+Paper Account C
+Ensemble
+€100,000
+
+all receiving the SAME realtime MT5 feed.
+
+Each maintains independent:
+
+signals
+positions
+PnL
+trade history
+
+This is extremely useful for genuine realtime out-of-sample comparison.
+
+It may be implemented after the single-account version is working, but design the architecture for it now.
+
+==================================================
+GRAPHICAL USER INTERFACE
+========================
+
+Build a full local graphical trading application.
+
+Use initially:
+
+Streamlit
++
+Plotly
+
+Keep Streamlit separate from the trading/ML engine.
+
+Suggested navigation:
+
+Dashboard
+Live Paper
+Backtest
+Experiments
+Models
+Trades
+Predictions
+Data
+Settings
+
+==================================================
+MAIN REALTIME DASHBOARD
+=======================
+
+Display:
+
+XAUUSD price
+BID
+ASK
+spread
+
+MT5 connection status
+
+latest candle timestamp
+latest inference timestamp
+
+P_up_1m
+P_up_3m
+P_up_5m
+P_up_10m
+P_up_15m
+P_up_30m
+
+expected returns
+
+temporal score
+
+multi-horizon score
+
+market regime
+
+FINAL SIGNAL
+
+BUY
+SELL
+HOLD
+EXIT
+NO_TRADE
+
+==================================================
+REALTIME CHART
+==============
+
+Create a realtime Plotly candlestick chart.
+
+Default:
+
+last 500 candles
+
+As new MT5 candles arrive:
+
+append new candle
+scroll/update chart
+update inference
+update account
+
+Overlay simulated trades.
+
+GREEN upward triangle / marker:
+
+BUY entry
+
+RED downward triangle / marker:
+
+SELL entry
+
+Distinct marker:
+
+EXIT
+
+For every marker provide tooltip details:
+
+timestamp
+entry/exit
+price
+confidence
+expected return
+spread
+market regime
+model
+SL
+TP
+PnL if closed
+
+==================================================
+SIGNAL EXPLANATION
+==================
+
+Display the ACTUAL rule-based reason.
+
+Example:
+
+SIGNAL: BUY
+
+P_up_1m: 71.4%
+P_up_5m: 75.1%
+P_up_15m: 70.8%
+
+Temporal score: 73.2%
+Multi-horizon score: 72.7%
+
+Expected return 5m: +0.08%
+
+Spread: ...
+
+Regime:
+Bullish / Normal volatility
+
+Reasons:
+
+confidence threshold passed
+3 confirmations
+5m and 15m agree
+expected move exceeds costs
+spread acceptable
+cooldown satisfied
+
+Do not generate fictional LLM explanations.
+
+==================================================
+LIVE PAPER CONTROLS
+===================
+
+Provide:
+
+START PAPER
+STOP PAPER
+RESET ACCOUNT
+
+Configuration controls:
+
+starting capital
+model
+strategy
+risk per trade
+position size
+leverage
+SL
+TP
+cooldown
+BUY threshold
+SELL threshold
+persistence
+expected return threshold
+
+Changes that would invalidate an active paper experiment should require confirmation/reset or begin a new experiment.
+
+==================================================
+BACKTEST PAGE
+=============
+
+Historical backtest is a separate mode from realtime.
+
+Allow:
+
+date range
+model
+strategy
+starting capital
+thresholds
+risk settings
+cost assumptions
+
+Show:
+
+historical chart
+trade markers
+equity
+drawdown
+statistics
+trades
+
+Do NOT label historical playback as LIVE.
+
+==================================================
+EXPERIMENT LAB
+==============
+
+Create GUI controls for experiment sweeps.
+
+Display sortable results.
+
+Allow selecting an experiment and loading its configuration into:
+
+Backtest
+
+or later:
+
+Live Paper.
+
+==================================================
+PREDICTION HISTORY
+==================
+
+Store every inference, including NO_TRADE.
+
+Columns:
+
+timestamp
+price
+P_up_1m
+P_up_3m
+P_up_5m
+P_up_10m
+P_up_15m
+P_up_30m
+temporal_score
+multi_horizon_score
+expected_return
+spread
+regime
+signal
+
+Save as Parquet.
+
+==================================================
+TRADE HISTORY
+=============
+
+Store:
+
+trade ID
+side
+entry time
+entry price
+exit time
+exit price
+confidence
+spread
+SL
+TP
+exit reason
+gross PnL
+costs
+net PnL
+
+Show in GUI.
+
+Export to CSV.
+
+==================================================
+APPLICATION STARTUP DATA UPDATE
+===============================
+
+The GUI should support:
+
+AUTO UPDATE HISTORICAL DATA ON STARTUP
+
+Default:
+
+enabled
+
+BUT:
+
+it must ONLY update recent missing historical data.
+
+It must NEVER redownload the entire historical database.
+
+Application startup logic:
+
+local MASTER exists?
+YES:
+inspect latest saved history
+update only missing/recent Dukascopy history
+validate
+append/deduplicate
+
+```
+NO:
+    tell user:
+    "Historical database has not been created. Run full historical download first."
+```
+
+DO NOT automatically launch the entire 2003-present history download from the GUI.
+
+==================================================
+LIVE STORAGE
+============
+
+While the application is running, also locally store completed MT5 M1 candles.
+
+Example:
+
+data/live/MT5_XAUUSD_M1.parquet
+
+This allows:
+
+realtime audit
+paper trading reconstruction
+broker-vs-Dukascopy comparison
+future broker-specific model training
+
+==================================================
+LIVE REAL TRADING
+=================
+
+Do not implement/enable real-money trading initially.
+
+Design an interface for future use, but:
+
+ENABLE_LIVE_TRADING = false
+
+Real broker orders MUST NOT occur during initial development.
+
+Paper trading first.
+
+==================================================
+PROJECT STRUCTURE
+=================
+
+Create a clean structure similar to:
+
+XAUUSD_TradingLab/
+
+```
+app.py
+
+configs/
+    data.yaml
+    features.yaml
+    models.yaml
+    training.yaml
+    strategy.yaml
+    backtest.yaml
+    live.yaml
+
+scripts/
+    download_full_history.ps1
+    update_history.ps1
+
+data/
+    raw/
+        bid/
+        ask/
+    processed/
+    yearly/
+    features/
+    live/
+
+models/
+
+results/
+
+reports/
+
+logs/
+
+src/
+    data/
+    features/
+    targets/
+    modeling/
+    validation/
+    signals/
+    backtest/
+    experiments/
+    live/
+    paper/
+    ui/
+    utils/
+
+tests/
+```
+
+==================================================
+TESTS
+=====
+
+Create tests for:
+
+BID/ASK merge
+timestamp handling
+duplicate handling
+historical update
+feature leakage
+target alignment
+walk-forward splits
+probability aggregation
+signal thresholds
+position state
+BID/ASK execution
+PnL
+slippage
+paper-account balance/equity
+MT5 candle completion detection
+
+==================================================
+DEVELOPMENT ORDER
+=================
+
+Do NOT try to build everything simultaneously.
+
+PHASE 1:
+
+inspect existing project
+create project structure
+create configs
+create downloader scripts
+create update logic
+create raw-data validator
+create BID/ASK merge
+create Parquet storage
+
+STOP after Phase 1 and show me what was created.
+
+Do NOT run the complete 2003-present download automatically.
+
+Tell me exactly which command I should manually run.
+
+PHASE 2, only after I confirm historical data exists:
+
+validate complete dataset
+build MASTER Parquet
+FeatureEngine
+targets
+
+PHASE 3:
+
+baseline ML
+Logistic Regression
+LightGBM/XGBoost
+walk-forward
+probability calibration
+
+PHASE 4:
+
+SignalAggregator
+NO_TRADE
+backtester
+costs
+experiment engine
+
+PHASE 5:
+
+basic Streamlit GUI
+
+PHASE 6:
+
+MT5 realtime feed
+realtime inference
+
+PHASE 7:
+
+realtime PaperAccount
+realtime chart markers
+model comparison
+
+PHASE 8:
+
+advanced models
+advanced analytics
+
+==================================================
+FIRST ACTION NOW
+================
+
+Begin ONLY with PHASE 1.
+
+Inspect the existing project and existing test files.
+
+Do not remove them.
+
+Create the correct project structure.
+
+Create:
+
+scripts/download_full_history.ps1
+
+scripts/update_history.ps1
+
+and the Python data modules needed to:
+
+validate
+merge
+deduplicate
+build Parquet.
+
+Do not download the complete historical dataset yet.
+
+After implementation:
+
+run only lightweight tests using the existing sample files.
+
+Then STOP and tell me:
+
+1. which files you created;
+2. whether the existing BID/ASK test files passed validation;
+3. the exact PowerShell command I should run to download the complete 2003-present history;
+4. where the downloaded files will be saved;
+5. what I should send you after the download finishes.
+
+Do not proceed to ML until I explicitly confirm that the historical download is complete.

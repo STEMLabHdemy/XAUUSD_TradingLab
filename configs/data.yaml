@@ -1,0 +1,14 @@
+instrument: xauusd
+timeframe: m1
+source: dukascopy
+history_start_utc: 2003-05-05
+raw_bid_dir: data/raw/bid
+raw_ask_dir: data/raw/ask
+master_path: data/processed/XAUUSD_M1_MASTER.parquet
+quality_report_path: reports/data_quality_report.csv
+download_log_path: logs/download_history.log
+incremental_overlap_months: 1
+download_retries: 3
+retry_delay_seconds: 10
+auto_update_historical_on_startup: true
+

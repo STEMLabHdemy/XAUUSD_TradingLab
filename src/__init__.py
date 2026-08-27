@@ -1,0 +1,2 @@
+"""XAUUSD TradingLab application package."""
+
