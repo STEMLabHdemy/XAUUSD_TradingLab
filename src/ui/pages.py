@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+from .live_dashboard import live_market_panel
 
 from .services import (
     ROOT, download_progress, load_experiments, load_market_range, load_model_metrics,
@@ -23,21 +23,13 @@ def _candlestick(market: pd.DataFrame, title: str) -> go.Figure:
 
 def dashboard() -> None:
     st.title("XAUUSD TradingLab")
-    st.warning("RESEARCH / HISTORICAL OOS — this screen is not realtime LIVE PAPER.")
-    market = load_recent_market(500)
+    st.caption("Mercato realtime MT5 · ricerca quantitativa e paper trading")
+    live_market_panel(str(ROOT))
     progress = download_progress()
     quality = load_quality_summary()
     experiments = load_experiments()
-    columns = st.columns(4)
-    if not market.empty:
-        latest = market.iloc[-1]
-        columns[0].metric("Latest MID", f"{latest.mid_close:,.3f}")
-        columns[1].metric("Latest BID / ASK", f"{latest.close_bid:,.3f} / {latest.close_ask:,.3f}")
-        columns[2].metric("Spread", f"{latest.spread_close:.3f}")
-        columns[3].metric("Latest historical candle", str(latest.datetime_utc))
-        st.plotly_chart(_candlestick(market, "Last 500 historical candles"), width="stretch")
-    st.subheader("Historical download")
-    st.write(f"Paired months: **{progress['paired_months']}**, range: **{progress['earliest_month']} → {progress['latest_month']}**, unpaired months: **{progress['unpaired_months']}**")
+    st.subheader("Archivio storico")
+    st.write(f"Mesi BID/ASK completi: **{progress['paired_months']}**, intervallo: **{progress['earliest_month']} → {progress['latest_month']}**, mesi spaiati: **{progress['unpaired_months']}**")
     if not quality.empty:
         st.caption(f"Master snapshot: {quality.iloc[0].earliest_candle} → {quality.iloc[0].latest_candle}; {int(quality.iloc[0].number_of_candles):,} candles")
     if not experiments.empty:
@@ -47,12 +39,9 @@ def dashboard() -> None:
 
 
 def live_paper() -> None:
-    st.title("Live Paper")
-    st.error("MT5 realtime feed is not enabled yet (Phase 6). Historical replay is not presented as LIVE.")
-    st.button("START PAPER", disabled=True)
-    st.button("STOP PAPER", disabled=True)
-    st.button("RESET ACCOUNT", disabled=True)
-    st.info("Real broker orders are disabled: ENABLE_LIVE_TRADING = false")
+    st.title("Live paper")
+    st.caption("Feed reale MT5, capitale virtuale; nessun ordine viene inviato al broker.")
+    live_market_panel(str(ROOT), show_paper_controls=True)
 
 
 def experiments_page() -> None:
@@ -63,7 +52,7 @@ def experiments_page() -> None:
         return
     sort_by = st.selectbox("Sort by", ["sharpe", "profit_factor", "expectancy", "net_pnl", "max_drawdown"])
     ascending = sort_by == "max_drawdown"
-    st.dataframe(experiments.sort_values(sort_by, ascending=ascending), use_container_width=True, hide_index=True)
+    st.dataframe(experiments.sort_values(sort_by, ascending=ascending), width="stretch", hide_index=True)
     st.caption("Ranking should consider robustness, drawdown, trade count and stability—not PnL alone.")
 
 
@@ -75,7 +64,7 @@ def models_page() -> None:
         return
     evaluation = st.selectbox("Evaluation", sorted(metrics.evaluation.unique()))
     selected = metrics[metrics.evaluation.eq(evaluation)]
-    st.dataframe(selected.sort_values("brier_score"), use_container_width=True, hide_index=True)
+    st.dataframe(selected.sort_values("brier_score"), width="stretch", hide_index=True)
     if "roc_auc" in selected:
         st.bar_chart(selected.set_index("model")["roc_auc"])
     st.warning("All current models and metrics are provisional until final historical retraining.")
@@ -131,7 +120,7 @@ def predictions_page() -> None:
     figure.add_hline(y=.68, line_dash="dash", line_color="green")
     figure.add_hline(y=.32, line_dash="dash", line_color="red")
     st.plotly_chart(figure, width="stretch")
-    st.dataframe(predictions.tail(1000), use_container_width=True, hide_index=True)
+    st.dataframe(predictions.tail(1000), width="stretch", hide_index=True)
 
 
 def trades_page() -> None:
@@ -140,17 +129,17 @@ def trades_page() -> None:
     if not experiment_id:
         return
     _, trades, _ = load_run(experiment_id)
-    st.dataframe(trades, use_container_width=True, hide_index=True)
+    st.dataframe(trades, width="stretch", hide_index=True)
     st.download_button("Export trades CSV", trades.to_csv(index=False), f"trades_{experiment_id}.csv", "text/csv")
 
 
 def data_page() -> None:
     st.title("Data Quality")
     summary, monthly = load_quality_summary(), load_quality_monthly()
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.dataframe(summary, width="stretch", hide_index=True)
     if not monthly.empty:
         st.subheader("Monthly audit")
-        st.dataframe(monthly, use_container_width=True, hide_index=True)
+        st.dataframe(monthly, width="stretch", hide_index=True)
 
 
 def settings_page() -> None:

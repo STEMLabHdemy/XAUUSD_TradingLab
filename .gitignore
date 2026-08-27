@@ -8,6 +8,7 @@ venv/
 # Local secrets
 .env
 .streamlit/secrets.toml
+metatrader5.txt
 
 # Dukascopy cache and generated logs
 .dukascopy-cache/

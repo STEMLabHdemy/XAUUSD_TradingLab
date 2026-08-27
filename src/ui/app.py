@@ -9,7 +9,7 @@ from .pages import (
 
 
 def main() -> None:
-    st.set_page_config(page_title="XAUUSD TradingLab", page_icon="📈", layout="wide")
+    st.set_page_config(page_title="XAUUSD TradingLab", page_icon=":material/query_stats:", layout="wide")
     pages = {
         "Dashboard": dashboard,
         "Live Paper": live_paper,

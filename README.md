@@ -3,9 +3,8 @@
 Phase 1 provides restartable Dukascopy XAUUSD M1 BID/ASK downloads, incremental
 updates, validation, timestamp deduplication, outer BID/ASK merge auditing, and
 atomic Parquet storage. Phase 2 adds a streaming snapshot builder, a causal
-FeatureEngine shared by future training/backtest/live paths, and aligned
-multi-horizon classification/regression targets. ML training, backtesting, GUI,
-MT5, and paper trading remain deferred to later phases.
+FeatureEngine shared by training/backtest/live paths, and aligned multi-horizon
+classification/regression targets.
 
 Phase 3 provides common probabilistic wrappers for Logistic Regression, Random
 Forest, LightGBM, and XGBoost; expanding/rolling walk-forward splitters with a
@@ -19,11 +18,33 @@ backtester, SL/TP/time exits, complete trade/equity ledgers, performance
 breakdowns, and Parquet-backed experiment sweeps. Historical playback is never
 labelled as live.
 
+Phase 5 provides the Streamlit research interface. Phase 6 adds a strictly
+read-only MetaTrader 5 connection for realtime XAUUSD BID/ASK ticks and completed
+M1 candles, automatic broker-clock normalization to UTC, Europe/Rome display,
+atomic local live storage, M1/M5 charts, and provisional 5-minute inference.
+M1-to-M5 aggregation is checked against native MT5 M5 candles. Real broker order
+routing is absent; the final signal remains `NO_TRADE` until genuine
+multi-horizon models are available. Phase 7 paper-account execution is still
+pending.
+
 ## Setup
 
 ```powershell
 python -m pip install -r .\requirements.txt
 ```
+
+## Realtime dashboard
+
+Open MetaTrader 5, log into a demo account, select the broker's XAUUSD symbol,
+and leave the terminal running. Then start the app:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_app.ps1
+```
+
+The dashboard reads the already-open MT5 session; account passwords are never
+stored in the project. Completed broker candles are written under `data/live/`,
+which is intentionally excluded from Git.
 
 ## Full history download (manual only)
 

@@ -1,3 +1,13 @@
-# Realtime broker orders remain disabled throughout the initial implementation.
+# Read-only MetaTrader 5 market-data connection. No order-routing code exists.
 enable_live_trading: false
-
+terminal_path: 'C:\Program Files\MetaTrader 5\terminal64.exe'
+symbol_candidates: [XAUUSD, XAUUSD.ecn, XAUUSD.cnt, GOLD]
+display_timezone: Europe/Rome
+fallback_server_utc_offset_seconds: 10800
+poll_interval_seconds: 1
+history_m1_bars: 2600
+storage_path: data/live/MT5_XAUUSD_M1.parquet
+model_path: models/lightgbm_up_5m_sigmoid_provisional.joblib
+model_manifest_path: models/baseline_manifest_provisional.json
+buy_threshold: 0.68
+sell_threshold: 0.32
