@@ -80,6 +80,19 @@ class Phase2Tests(unittest.TestCase):
         result = TargetEngine(TargetConfig(horizons=(1,), neutral_cost_multiplier=1)).transform(flat)
         self.assertEqual(result.direction_1m.iloc[0], "NEUTRAL")
 
+    def test_executable_target_uses_next_open_and_future_opposite_side(self) -> None:
+        market = self.market.head(8).copy().reset_index(drop=True)
+        market[["open_bid", "open_ask", "close_bid", "close_ask"]] = [100.0, 100.4, 100.0, 100.4]
+        market.loc[3, "close_bid"] = 101.2
+        result = TargetEngine(TargetConfig(
+            horizons=(3,), executable_minimum_net_move=.5,
+            slippage_price_per_side=.05,
+        )).transform(market)
+
+        self.assertAlmostEqual(result.loc[0, "future_long_net_3m"], .7)
+        self.assertEqual(result.loc[0, "executable_direction_3m"], "UP")
+        self.assertTrue(pd.isna(result.loc[5, "executable_direction_3m"]))
+
     def test_streaming_snapshot_writes_canonical_parquet(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

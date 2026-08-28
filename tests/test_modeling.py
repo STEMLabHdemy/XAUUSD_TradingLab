@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -8,6 +10,7 @@ import pandas as pd
 from src.modeling.calibration import TemporallyCalibratedModel, probability_metrics
 from src.modeling.models import ModelConfig, create_model
 from src.modeling.walk_forward import WalkForwardConfig, WalkForwardSplitter, temporal_development_oos_split
+from src.experiments.search_cost_aware import _finalists
 
 
 class ModelingTests(unittest.TestCase):
@@ -45,6 +48,25 @@ class ModelingTests(unittest.TestCase):
     def test_optional_gradient_boosting_models_construct(self) -> None:
         self.assertEqual(create_model("lightgbm").name, "lightgbm")
         self.assertEqual(create_model("xgboost").name, "xgboost")
+
+    def test_cost_aware_finalists_ignore_untouched_oos_score(self) -> None:
+        metrics = pd.DataFrame([
+            {
+                "candidate": "stable", "evaluation": "untouched_oos",
+                "macro_roc_auc": .51, "walk_auc_mean": .64,
+                "walk_auc_min": .62, "walk_auc_std": .01,
+            },
+            {
+                "candidate": "oos_lucky", "evaluation": "untouched_oos",
+                "macro_roc_auc": .99, "walk_auc_mean": .53,
+                "walk_auc_min": .51, "walk_auc_std": .08,
+            },
+        ])
+        with TemporaryDirectory() as directory:
+            results = Path(directory) / "results"
+            results.mkdir()
+            metrics.to_csv(results / "metrics.csv", index=False)
+            self.assertEqual(_finalists(Path(directory), count=1), ["stable"])
 
 
 if __name__ == "__main__":
