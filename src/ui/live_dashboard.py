@@ -22,6 +22,116 @@ def _price(value: float, digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
 
 
+def _pnl_color(value: float) -> str:
+    if value > 0:
+        return "color: #34D399; font-weight: 600"
+    if value < 0:
+        return "color: #F87171; font-weight: 600"
+    return "color: #94A3B8"
+
+
+def _open_positions_frame(
+    runtime: PaperRuntime,
+    tick: object,
+    display_timezone: str,
+) -> pd.DataFrame:
+    """Build one live, human-readable row for every open paper position."""
+    rows: list[dict[str, object]] = []
+    now = pd.Timestamp(tick.datetime_utc)
+    for model, account in runtime.accounts.items():
+        state = account.snapshot()
+        position = state["position"]
+        if not position:
+            continue
+        side = str(position["side"])
+        entry_time = pd.Timestamp(position["entry_time"])
+        if entry_time.tzinfo is None:
+            entry_time = entry_time.tz_localize("UTC")
+        else:
+            entry_time = entry_time.tz_convert("UTC")
+        held_minutes = max(0, int((now - entry_time).total_seconds() // 60))
+        mark_price = float(tick.bid if side == "LONG" else tick.ask)
+        stop_loss = position.get("stop_loss")
+        take_profit = position.get("take_profit")
+        stop_distance = (
+            mark_price - float(stop_loss) if side == "LONG" else float(stop_loss) - mark_price
+        ) if stop_loss is not None else None
+        take_distance = (
+            float(take_profit) - mark_price if side == "LONG" else mark_price - float(take_profit)
+        ) if take_profit is not None else None
+        rows.append({
+            "Modello": model,
+            "Direzione": f"▲ {side}" if side == "LONG" else f"▼ {side}",
+            "Aperta alle": entry_time.tz_convert(display_timezone).strftime("%d/%m %H:%M:%S"),
+            "Durata": f"{held_minutes // 60}h {held_minutes % 60:02d}m" if held_minutes >= 60 else f"{held_minutes} min",
+            "Quantità": float(position["quantity"]),
+            "Ingresso": float(position["entry_price"]),
+            "Prezzo ora": mark_price,
+            "PnL aperto": float(state["unrealized_pnl"]),
+            "SL": float(stop_loss) if stop_loss is not None else None,
+            "Distanza SL": stop_distance,
+            "TP": float(take_profit) if take_profit is not None else None,
+            "Distanza TP": take_distance,
+        })
+    return pd.DataFrame(rows)
+
+
+def _portfolio_totals(runtime: PaperRuntime) -> dict[str, float | int]:
+    states = [(account, account.snapshot()) for account in runtime.accounts.values()]
+    starting_capital = sum(account.config.starting_capital for account, _ in states)
+    realized = sum(float(state["realized_pnl"]) for _, state in states)
+    unrealized = sum(float(state["unrealized_pnl"]) for _, state in states)
+    return {
+        "starting_capital": starting_capital,
+        "equity": sum(float(state["equity"]) for _, state in states),
+        "realized_pnl": realized,
+        "unrealized_pnl": unrealized,
+        "total_pnl": realized + unrealized,
+        "open_positions": sum(state["position"] is not None for _, state in states),
+    }
+
+
+def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_timezone: str) -> None:
+    with st.container(border=True):
+        st.subheader("Portafoglio paper in tempo reale")
+        st.caption("Somma dei tre modelli sullo stesso feed MT5. Capitale virtuale; nessun ordine viene inviato al broker.")
+        totals = _portfolio_totals(runtime)
+        total_return = totals["total_pnl"] / totals["starting_capital"] if totals["starting_capital"] else 0.0
+        with st.container(horizontal=True):
+            st.metric(
+                "PnL totale",
+                f"{totals['total_pnl']:+,.2f} USD",
+                f"{total_return:+.3%} sul capitale",
+                border=True,
+            )
+            st.metric("PnL realizzato", f"{totals['realized_pnl']:+,.2f} USD", border=True)
+            st.metric("PnL posizioni aperte", f"{totals['unrealized_pnl']:+,.2f} USD", border=True)
+            st.metric("Posizioni aperte", f"{totals['open_positions']} / {len(runtime.accounts)}", border=True)
+
+        positions = _open_positions_frame(runtime, tick, display_timezone)
+        st.markdown("**Posizioni aperte adesso**")
+        if positions.empty:
+            st.info("Nessun modello ha una posizione aperta in questo momento.", icon=":material/hourglass_empty:")
+            return
+        styled_positions = positions.style.map(_pnl_color, subset=["PnL aperto"])
+        st.dataframe(
+            styled_positions,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Modello": st.column_config.TextColumn(pinned=True),
+                "Quantità": st.column_config.NumberColumn(format="%.2f"),
+                "Ingresso": st.column_config.NumberColumn(format="%.2f"),
+                "Prezzo ora": st.column_config.NumberColumn(format="%.2f"),
+                "PnL aperto": st.column_config.NumberColumn(format="%+.2f USD"),
+                "SL": st.column_config.NumberColumn(format="%.2f"),
+                "Distanza SL": st.column_config.NumberColumn(format="%+.2f"),
+                "TP": st.column_config.NumberColumn(format="%.2f"),
+                "Distanza TP": st.column_config.NumberColumn(format="%+.2f"),
+            },
+        )
+
+
 def live_candlestick_figure(
     m1_bars: pd.DataFrame,
     timeframe: str,
@@ -203,6 +313,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         selected_model = next(iter(runtime.accounts))
         if show_paper_controls:
             selected_model = st.selectbox("Paper account / modello", list(runtime.accounts), key="paper_selected_model")
+            _render_portfolio_overview(runtime, tick, service.display_timezone)
     selected_account = runtime.accounts[selected_model]
     selected_state = selected_account.snapshot()
     figure = live_candlestick_figure(
@@ -244,8 +355,8 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
 
     if show_paper_controls:
         with st.container(border=True):
-            st.subheader(f"Paper account · {selected_model}")
-            st.caption("Dati reali MT5, denaro virtuale. Nessun ordine può essere inviato al broker.")
+            st.subheader(f"Dettaglio account · {selected_model}")
+            st.caption("Controlli e risultati del modello selezionato.")
             with st.container(horizontal=True):
                 if st.button("Avvia paper", icon=":material/play_arrow:", disabled=bool(selected_state["running"])):
                     selected_account.start(); st.rerun(scope="fragment")
@@ -255,12 +366,17 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 if st.button("Reset account", icon=":material/restart_alt:", disabled=not confirm_reset):
                     selected_account.reset(); st.rerun(scope="fragment")
             selected_state = selected_account.snapshot()
+            selected_total_pnl = float(selected_state["realized_pnl"]) + float(selected_state["unrealized_pnl"])
             with st.container(horizontal=True):
                 st.metric("Saldo", f"{selected_state['balance']:,.2f} {selected_account.config.currency}", border=True)
                 st.metric("Equity", f"{selected_state['equity']:,.2f}", f"{selected_state['equity'] - selected_account.config.starting_capital:+,.2f}", border=True)
-                st.metric("PnL non realizzato", f"{selected_state['unrealized_pnl']:+,.2f}", border=True)
+                st.metric("PnL totale", f"{selected_total_pnl:+,.2f}", border=True)
+                st.metric("PnL aperto", f"{selected_state['unrealized_pnl']:+,.2f}", border=True)
+            with st.container(horizontal=True):
+                st.metric("PnL realizzato", f"{selected_state['realized_pnl']:+,.2f}", border=True)
                 st.metric("Margine libero", f"{selected_state['free_margin']:,.2f}", border=True)
                 st.metric("Max drawdown", f"{selected_state['max_drawdown']:.2%}", border=True)
+                st.metric("Trade chiusi", f"{len(selected_state['trades'])}", border=True)
             position = selected_state["position"]
             st.info(
                 f"{'RUNNING' if selected_state['running'] else 'STOPPED'} · Posizione: "
@@ -268,10 +384,32 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 icon=":material/play_circle:" if selected_state["running"] else ":material/pause_circle:",
             )
 
-            st.subheader("Confronto realtime", help="Stesso feed e stessa configurazione, stato e PnL indipendenti.")
-            comparison = runtime.comparison()
-            st.dataframe(comparison, width="stretch", hide_index=True,
-                         column_config={"max_drawdown": st.column_config.NumberColumn(format="percent")})
+            st.subheader("Confronto tra modelli", help="Stesso feed e stessa configurazione, stato e PnL indipendenti.")
+            comparison = runtime.comparison().rename(columns={
+                "model": "Modello", "status": "Stato", "balance": "Saldo", "equity": "Equity",
+                "realized_pnl": "PnL realizzato", "unrealized_pnl": "PnL aperto", "total_pnl": "PnL totale",
+                "return_pct": "Rendimento", "free_margin": "Margine libero", "trades": "Trade",
+                "position": "Posizione", "signal": "Segnale", "max_drawdown": "Max drawdown",
+            })
+            styled_comparison = comparison.style.map(
+                _pnl_color, subset=["PnL realizzato", "PnL aperto", "PnL totale"]
+            )
+            st.dataframe(
+                styled_comparison,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Modello": st.column_config.TextColumn(pinned=True),
+                    "Saldo": st.column_config.NumberColumn(format="%.2f"),
+                    "Equity": st.column_config.NumberColumn(format="%.2f"),
+                    "PnL realizzato": st.column_config.NumberColumn(format="%+.2f"),
+                    "PnL aperto": st.column_config.NumberColumn(format="%+.2f"),
+                    "PnL totale": st.column_config.NumberColumn(format="%+.2f"),
+                    "Rendimento": st.column_config.NumberColumn(format="percent"),
+                    "Margine libero": st.column_config.NumberColumn(format="%.2f"),
+                    "Max drawdown": st.column_config.NumberColumn(format="percent"),
+                },
+            )
 
             with st.expander("Configurazione esperimento"):
                 cfg = selected_account.config
@@ -309,5 +447,33 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
             if trades.empty:
                 st.caption("Nessun trade chiuso per ora.")
             else:
-                st.dataframe(trades.sort_values("exit_time", ascending=False), width="stretch", hide_index=True)
+                history = trades.sort_values("exit_time", ascending=False).copy()
+                history["entry_time"] = pd.to_datetime(history["entry_time"], utc=True).dt.tz_convert(service.display_timezone)
+                history["exit_time"] = pd.to_datetime(history["exit_time"], utc=True).dt.tz_convert(service.display_timezone)
+                history = history.rename(columns={
+                    "trade_id": "Trade", "side": "Direzione", "entry_time": "Apertura",
+                    "entry_price": "Ingresso", "exit_time": "Chiusura", "exit_price": "Uscita",
+                    "quantity": "Quantità", "gross_pnl": "PnL lordo", "costs": "Costi",
+                    "net_pnl": "PnL netto", "exit_reason": "Motivo uscita",
+                })
+                visible_history = history[[
+                    "Trade", "Direzione", "Apertura", "Chiusura", "Ingresso", "Uscita",
+                    "Quantità", "PnL lordo", "Costi", "PnL netto", "Motivo uscita",
+                ]]
+                styled_history = visible_history.style.map(_pnl_color, subset=["PnL netto"])
+                st.dataframe(
+                    styled_history,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Apertura": st.column_config.DatetimeColumn(format="DD/MM HH:mm:ss"),
+                        "Chiusura": st.column_config.DatetimeColumn(format="DD/MM HH:mm:ss"),
+                        "Ingresso": st.column_config.NumberColumn(format="%.2f"),
+                        "Uscita": st.column_config.NumberColumn(format="%.2f"),
+                        "Quantità": st.column_config.NumberColumn(format="%.2f"),
+                        "PnL lordo": st.column_config.NumberColumn(format="%+.2f"),
+                        "Costi": st.column_config.NumberColumn(format="%.2f"),
+                        "PnL netto": st.column_config.NumberColumn(format="%+.2f USD"),
+                    },
+                )
                 st.download_button("Esporta CSV", trades.to_csv(index=False), f"paper_{selected_account.account_id}.csv", "text/csv")

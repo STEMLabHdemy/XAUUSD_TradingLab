@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.live.inference import LiveInference
 from src.live.mt5_client import MarketTick
-from src.paper import PaperAccount, PaperConfig
+from src.paper import PaperAccount, PaperConfig, PaperRuntime
 
 
 def tick(minute: int, bid: float, ask: float) -> MarketTick:
@@ -89,6 +89,21 @@ class PaperAccountTests(unittest.TestCase):
             account = self.account(directory)
             account.process(tick(0, 100, 101), inference(0, .9))
             self.assertIsNone(account.snapshot()["position"])
+
+    def test_runtime_comparison_separates_realized_open_and_total_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(0, 103, 104), inference(0, .9))
+            runtime = PaperRuntime.__new__(PaperRuntime)
+            runtime.accounts = {"TestModel": account}
+
+            row = runtime.comparison().iloc[0]
+
+            self.assertAlmostEqual(row.total_pnl, row.realized_pnl + row.unrealized_pnl)
+            self.assertAlmostEqual(row.return_pct, row.total_pnl / account.config.starting_capital)
+            self.assertEqual(row.position, "LONG")
 
 
 if __name__ == "__main__":

@@ -305,10 +305,22 @@ class PaperRuntime:
         rows = []
         for name, account in self.accounts.items():
             state = account.snapshot()
-            rows.append({"model": name, "status": "RUNNING" if state["running"] else "STOPPED", "balance": state["balance"],
-                         "equity": state["equity"], "pnl": state["equity"] - account.config.starting_capital,
-                         "trades": len(state["trades"]), "position": state["position"]["side"] if state["position"] else "FLAT",
-                         "signal": state["last_signal"], "max_drawdown": state["max_drawdown"]})
+            total_pnl = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
+            rows.append({
+                "model": name,
+                "status": "RUNNING" if state["running"] else "STOPPED",
+                "balance": state["balance"],
+                "equity": state["equity"],
+                "realized_pnl": state["realized_pnl"],
+                "unrealized_pnl": state["unrealized_pnl"],
+                "total_pnl": total_pnl,
+                "return_pct": total_pnl / account.config.starting_capital,
+                "free_margin": state["free_margin"],
+                "trades": len(state["trades"]),
+                "position": state["position"]["side"] if state["position"] else "FLAT",
+                "signal": state["last_signal"],
+                "max_drawdown": state["max_drawdown"],
+            })
         return pd.DataFrame(rows)
 
     def reconfigure_and_reset(self, config: PaperConfig) -> None:
