@@ -5,7 +5,6 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-from src.ui.live_dashboard import live_candlestick_figure
 from tests.test_live import m1_frame
 
 
@@ -17,6 +16,8 @@ class UISmokeTests(unittest.TestCase):
         self.assertTrue(any("XAUUSD TradingLab" in title.value for title in app.title))
 
     def test_live_chart_viewport_revision_is_stable_across_ticks(self) -> None:
+        from src.ui.live_dashboard import live_candlestick_figure
+
         first = m1_frame(10)
         second = first.copy()
         second.loc[second.index[-1], "mid_close"] += 1

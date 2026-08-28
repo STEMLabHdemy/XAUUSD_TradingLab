@@ -13,6 +13,7 @@ import yaml
 from src.live import LiveMarketService
 from src.live.timeframes import chart_bars
 from src.paper import PaperConfig, PaperRuntime
+from .realtime_plotly import realtime_plotly_chart
 
 
 def _price(value: float, digits: int = 2) -> str:
@@ -206,19 +207,19 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         snapshot.m1_bars, str(timeframe), service.display_timezone, int(visible), bool(auto_follow),
         selected_account.events_frame() if show_paper_controls else None,
     )
-    chart_slot.plotly_chart(
-        figure,
-        width="stretch",
-        height=680,
-        key=f"live_chart_{timeframe}_{show_paper_controls}",
-        config={
-            "scrollZoom": True,
-            "displayModeBar": True,
-            "displaylogo": False,
-            "responsive": True,
-            "doubleClick": "reset+autosize",
-        },
-    )
+    with chart_slot:
+        realtime_plotly_chart(
+            figure,
+            key=f"live_chart_{show_paper_controls}",
+            viewport_revision=str(figure.layout.uirevision),
+            config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "displaylogo": False,
+                "responsive": True,
+                "doubleClick": "reset+autosize",
+            },
+        )
 
     inference = snapshot.inference
     with st.container(border=True):
