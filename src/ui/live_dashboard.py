@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 import streamlit as st
+from xauusd_realtime_chart import xauusd_realtime_chart
 import yaml
 
 from src.live import LiveMarketService
@@ -206,19 +209,21 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         snapshot.m1_bars, str(timeframe), service.display_timezone, int(visible), bool(auto_follow),
         selected_account.events_frame() if show_paper_controls else None,
     )
-    chart_slot.plotly_chart(
-        figure,
-        width="stretch",
-        height=680,
-        key=f"live_chart_{timeframe}_{show_paper_controls}",
-        config={
-            "scrollZoom": True,
-            "displayModeBar": True,
-            "displaylogo": False,
-            "responsive": True,
-            "doubleClick": "reset+autosize",
-        },
-    )
+    figure_payload = json.loads(pio.to_json(figure, validate=False, remove_uids=True))
+    figure_payload.get("layout", {}).pop("template", None)
+    with chart_slot:
+        xauusd_realtime_chart(
+            figure_payload,
+            key=f"live_chart_{show_paper_controls}",
+            viewport_revision=str(figure.layout.uirevision),
+            config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "displaylogo": False,
+                "responsive": True,
+                "doubleClick": "reset+autosize",
+            },
+        )
 
     inference = snapshot.inference
     with st.container(border=True):

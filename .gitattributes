@@ -1,0 +1,2 @@
+# Compiled third-party Plotly bundle; review and whitespace checks apply to src/.
+components/xauusd-realtime-chart/xauusd_realtime_chart/frontend/build/*.js -diff

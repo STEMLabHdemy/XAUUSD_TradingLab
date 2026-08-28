@@ -8,3 +8,4 @@ lightgbm>=4.0
 streamlit>=1.50
 plotly>=6.0
 MetaTrader5>=5.0.6147
+-e ./components/xauusd-realtime-chart
