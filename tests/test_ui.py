@@ -29,6 +29,13 @@ class UISmokeTests(unittest.TestCase):
         self.assertGreater(figure_a.layout.yaxis.domain[0], figure_a.layout.yaxis2.domain[1])
         self.assertFalse(figure_a.layout.xaxis.rangeslider.visible)
 
+    def test_model_laboratory_renders_without_exception(self) -> None:
+        app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py"))
+        app.run(timeout=20)
+        app.sidebar.radio[0].set_value("Models").run(timeout=20)
+        self.assertEqual(app.exception, [])
+        self.assertTrue(any("Laboratorio modelli" in title.value for title in app.title))
+
 
 if __name__ == "__main__":
     unittest.main()

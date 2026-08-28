@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from threading import RLock
 from typing import Any
+import math
 
 import pandas as pd
 
@@ -105,6 +106,57 @@ class PaperAccount:
     def reset(self) -> None:
         with self._lock:
             self.state = self._new_state()
+            self._save()
+
+    def update_protection(
+        self,
+        tick: MarketTick,
+        stop_loss: float | None,
+        take_profit: float | None,
+    ) -> None:
+        """Update virtual SL/TP after validating them against the executable price."""
+        with self._lock:
+            position = self.state["position"]
+            if not position:
+                raise ValueError("Non c'è una posizione aperta da modificare")
+            for label, value in (("Stop loss", stop_loss), ("Take profit", take_profit)):
+                if value is not None and (not math.isfinite(float(value)) or float(value) <= 0):
+                    raise ValueError(f"{label} deve essere un prezzo positivo")
+            side = str(position["side"])
+            executable = float(tick.bid if side == "LONG" else tick.ask)
+            if side == "LONG":
+                if stop_loss is not None and float(stop_loss) >= executable:
+                    raise ValueError(f"Per un LONG lo stop deve essere sotto il BID corrente ({executable:.2f})")
+                if take_profit is not None and float(take_profit) <= executable:
+                    raise ValueError(f"Per un LONG il target deve essere sopra il BID corrente ({executable:.2f})")
+            else:
+                if stop_loss is not None and float(stop_loss) <= executable:
+                    raise ValueError(f"Per uno SHORT lo stop deve essere sopra l'ASK corrente ({executable:.2f})")
+                if take_profit is not None and float(take_profit) >= executable:
+                    raise ValueError(f"Per uno SHORT il target deve essere sotto l'ASK corrente ({executable:.2f})")
+            old_stop, old_take = position.get("stop_loss"), position.get("take_profit")
+            position["stop_loss"] = float(stop_loss) if stop_loss is not None else None
+            position["take_profit"] = float(take_profit) if take_profit is not None else None
+            self.state["events"].append({
+                "event": "MODIFY", "timestamp": tick.datetime_utc.isoformat(),
+                "trade_id": position["trade_id"], "model": self.model,
+                "side": side, "price": executable, "old_stop_loss": old_stop,
+                "old_take_profit": old_take, "stop_loss": position["stop_loss"],
+                "take_profit": position["take_profit"],
+            })
+            self.state["last_reason"] = "SL/TP modificati manualmente"
+            self._mark(tick, save=False)
+            self._save()
+
+    def close_manually(self, tick: MarketTick) -> None:
+        """Close the current virtual position at the executable market side."""
+        with self._lock:
+            if not self.state["position"]:
+                raise ValueError("Non c'è una posizione aperta da chiudere")
+            self._close(tick, "manual_close")
+            self.state["last_signal"] = "EXIT"
+            self.state["last_reason"] = "chiusura manuale"
+            self._mark(tick, save=False)
             self._save()
 
     def _today_stats(self, timestamp: pd.Timestamp) -> tuple[int, float]:
@@ -274,17 +326,29 @@ class PaperRuntime:
     def __init__(self, root: Path | str, config: PaperConfig):
         self.root, self.config = Path(root), config
         manifest = self.root / "models/baseline_manifest_provisional.json"
-        definitions = {
-            "LightGBM": "lightgbm_up_5m_sigmoid_provisional.joblib",
-            "Logistic Regression": "logistic_regression_up_5m_sigmoid_provisional.joblib",
-            "XGBoost": "xgboost_up_5m_sigmoid_provisional.joblib",
-        }
+        definitions: list[tuple[str, Path, Path, str]] = [
+            ("LightGBM", self.root / "models/lightgbm_up_5m_sigmoid_provisional.joblib", manifest, "lightgbm"),
+            ("Logistic Regression", self.root / "models/logistic_regression_up_5m_sigmoid_provisional.joblib", manifest, "logistic_regression"),
+            ("XGBoost", self.root / "models/xgboost_up_5m_sigmoid_provisional.joblib", manifest, "xgboost"),
+        ]
+        selection_path = self.root / "data/live/paper/model_selection.json"
+        if selection_path.exists():
+            try:
+                selected = json.loads(selection_path.read_text(encoding="utf-8"))
+                custom = []
+                for item in selected.get("models", []):
+                    model_path, manifest_path = Path(item["artifact"]), Path(item["manifest"])
+                    if model_path.exists() and manifest_path.exists():
+                        account_key = hashlib.sha256(str(model_path.resolve()).encode()).hexdigest()[:12]
+                        custom.append((str(item["label"]), model_path, manifest_path, account_key))
+                if custom:
+                    definitions = custom
+            except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                pass
         self.engines, self.accounts = {}, {}
-        for label, filename in definitions.items():
-            path = self.root / "models" / filename
+        for label, path, model_manifest, key in definitions:
             if path.exists():
-                self.engines[label] = LiveInferenceEngine(path, manifest, config.buy_threshold, config.sell_threshold)
-                key = label.lower().replace(" ", "_")
+                self.engines[label] = LiveInferenceEngine(path, model_manifest, config.buy_threshold, config.sell_threshold)
                 self.accounts[label] = PaperAccount(key, label, config, self.root / "data/live/paper")
         self._last_bar: int | None = None
         self._inferences: dict[str, LiveInference] = {}

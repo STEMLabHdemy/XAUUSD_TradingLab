@@ -59,12 +59,19 @@ def _open_positions_frame(
         take_distance = (
             float(take_profit) - mark_price if side == "LONG" else mark_price - float(take_profit)
         ) if take_profit is not None else None
+        quantity = float(position["quantity"])
+        notional = mark_price * quantity
+        margin = notional / float(account.config.leverage)
+        risk_to_stop = max(0.0, float(stop_distance) * quantity) if stop_distance is not None else None
         rows.append({
             "Modello": model,
             "Direzione": f"▲ {side}" if side == "LONG" else f"▼ {side}",
             "Aperta alle": entry_time.tz_convert(display_timezone).strftime("%d/%m %H:%M:%S"),
             "Durata": f"{held_minutes // 60}h {held_minutes % 60:02d}m" if held_minutes >= 60 else f"{held_minutes} min",
-            "Quantità": float(position["quantity"]),
+            "Quantità": quantity,
+            "Nozionale": notional,
+            "Margine": margin,
+            "Rischio a SL": risk_to_stop,
             "Ingresso": float(position["entry_price"]),
             "Prezzo ora": mark_price,
             "PnL aperto": float(state["unrealized_pnl"]),
@@ -88,7 +95,49 @@ def _portfolio_totals(runtime: PaperRuntime) -> dict[str, float | int]:
         "unrealized_pnl": unrealized,
         "total_pnl": realized + unrealized,
         "open_positions": sum(state["position"] is not None for _, state in states),
+        "exposure": sum(float(state["exposure"]) for _, state in states),
+        "used_margin": sum(float(state["used_margin"]) for _, state in states),
     }
+
+
+def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str) -> pd.DataFrame:
+    """One ledger containing every open and closed trade from every paper account."""
+    rows: list[dict[str, object]] = []
+    for model, account in runtime.accounts.items():
+        state = account.snapshot()
+        position = state.get("position")
+        if position:
+            side = str(position["side"])
+            mark = float(tick.bid if side == "LONG" else tick.ask)
+            quantity = float(position["quantity"])
+            rows.append({
+                "Stato": "APERTO", "Modello": model, "Trade": position["trade_id"],
+                "Direzione": side, "Apertura": position["entry_time"], "Chiusura": None,
+                "Ingresso": float(position["entry_price"]), "Prezzo/Uscita": mark,
+                "Quantità": quantity, "Nozionale": mark * quantity,
+                "Margine": mark * quantity / account.config.leverage,
+                "SL": position.get("stop_loss"), "TP": position.get("take_profit"),
+                "PnL": float(state["unrealized_pnl"]), "Costi": None, "Motivo uscita": "—",
+            })
+        for trade in state.get("trades", []):
+            quantity = float(trade["quantity"])
+            rows.append({
+                "Stato": "CHIUSO", "Modello": model, "Trade": trade["trade_id"],
+                "Direzione": trade["side"], "Apertura": trade["entry_time"],
+                "Chiusura": trade["exit_time"], "Ingresso": float(trade["entry_price"]),
+                "Prezzo/Uscita": float(trade["exit_price"]), "Quantità": quantity,
+                "Nozionale": float(trade["raw_entry_price"]) * quantity,
+                "Margine": float(trade["raw_entry_price"]) * quantity / account.config.leverage,
+                "SL": trade.get("stop_loss"), "TP": trade.get("take_profit"),
+                "PnL": float(trade["net_pnl"]), "Costi": float(trade["costs"]),
+                "Motivo uscita": trade["exit_reason"],
+            })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    frame["Apertura"] = pd.to_datetime(frame["Apertura"], utc=True).dt.tz_convert(display_timezone)
+    frame["Chiusura"] = pd.to_datetime(frame["Chiusura"], utc=True, errors="coerce").dt.tz_convert(display_timezone)
+    return frame.sort_values("Apertura", ascending=False).reset_index(drop=True)
 
 
 def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_timezone: str) -> None:
@@ -107,9 +156,15 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
             st.metric("PnL realizzato", f"{totals['realized_pnl']:+,.2f} USD", border=True)
             st.metric("PnL posizioni aperte", f"{totals['unrealized_pnl']:+,.2f} USD", border=True)
             st.metric("Posizioni aperte", f"{totals['open_positions']} / {len(runtime.accounts)}", border=True)
+            st.metric("Esposizione", f"{totals['exposure']:,.2f} USD", border=True)
+            st.metric("Margine usato", f"{totals['used_margin']:,.2f} USD", border=True)
 
         positions = _open_positions_frame(runtime, tick, display_timezone)
         st.markdown("**Posizioni aperte adesso**")
+        st.caption(
+            "Quantità = unità di XAUUSD. Nozionale = prezzo × quantità; margine = nozionale ÷ leva. "
+            "Il margine non è la perdita massima: il rischio a SL è la distanza dallo stop × quantità, prima dei costi."
+        )
         if positions.empty:
             st.info("Nessun modello ha una posizione aperta in questo momento.", icon=":material/hourglass_empty:")
             return
@@ -121,6 +176,9 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
             column_config={
                 "Modello": st.column_config.TextColumn(pinned=True),
                 "Quantità": st.column_config.NumberColumn(format="%.2f"),
+                "Nozionale": st.column_config.NumberColumn(format="%.2f USD"),
+                "Margine": st.column_config.NumberColumn(format="%.2f USD"),
+                "Rischio a SL": st.column_config.NumberColumn(format="%.2f USD"),
                 "Ingresso": st.column_config.NumberColumn(format="%.2f"),
                 "Prezzo ora": st.column_config.NumberColumn(format="%.2f"),
                 "PnL aperto": st.column_config.NumberColumn(format="%+.2f USD"),
@@ -384,6 +442,54 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 icon=":material/play_circle:" if selected_state["running"] else ":material/pause_circle:",
             )
 
+            open_models = [name for name, account in runtime.accounts.items() if account.snapshot()["position"]]
+            with st.expander("Gestisci una posizione aperta", icon=":material/edit:", expanded=bool(open_models)):
+                if not open_models:
+                    st.caption("Nessuna posizione aperta da modificare.")
+                else:
+                    managed_model = st.selectbox("Posizione", open_models, key="managed_paper_position")
+                    managed_account = runtime.accounts[managed_model]
+                    managed_position = managed_account.snapshot()["position"]
+                    side = managed_position["side"]
+                    executable = float(tick.bid if side == "LONG" else tick.ask)
+                    quantity = float(managed_position["quantity"])
+                    st.caption(
+                        f"{side} · {quantity:.2f} unità · prezzo eseguibile {executable:.2f} · "
+                        f"nozionale {executable * quantity:,.2f} USD · "
+                        f"margine {executable * quantity / managed_account.config.leverage:,.2f} USD"
+                    )
+                    with st.form(f"protection_{managed_account.account_id}", border=False):
+                        with st.container(horizontal=True):
+                            use_sl = st.checkbox("Stop loss attivo", value=managed_position.get("stop_loss") is not None)
+                            new_sl = st.number_input(
+                                "Nuovo SL", min_value=0.01,
+                                value=float(managed_position.get("stop_loss") or executable), step=0.10,
+                            )
+                            use_tp = st.checkbox("Take profit attivo", value=managed_position.get("take_profit") is not None)
+                            new_tp = st.number_input(
+                                "Nuovo TP", min_value=0.01,
+                                value=float(managed_position.get("take_profit") or executable), step=0.10,
+                            )
+                        if st.form_submit_button("Salva SL e TP", icon=":material/save:", type="primary"):
+                            try:
+                                managed_account.update_protection(
+                                    tick, float(new_sl) if use_sl else None, float(new_tp) if use_tp else None
+                                )
+                                st.success("Protezione aggiornata e registrata nello storico eventi.")
+                                st.rerun(scope="fragment")
+                            except ValueError as exc:
+                                st.error(str(exc))
+                    confirm_close = st.checkbox(
+                        f"Confermo la chiusura virtuale di {managed_model}",
+                        key=f"confirm_manual_close_{managed_account.account_id}",
+                    )
+                    if st.button(
+                        "Chiudi posizione a mercato", icon=":material/close:",
+                        disabled=not confirm_close, key=f"manual_close_{managed_account.account_id}",
+                    ):
+                        managed_account.close_manually(tick)
+                        st.rerun(scope="fragment")
+
             st.subheader("Confronto tra modelli", help="Stesso feed e stessa configurazione, stato e PnL indipendenti.")
             comparison = runtime.comparison().rename(columns={
                 "model": "Modello", "status": "Stato", "balance": "Saldo", "equity": "Equity",
@@ -413,6 +519,10 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
 
             with st.expander("Configurazione esperimento"):
                 cfg = selected_account.config
+                st.caption(
+                    "La size è fissa in unità. “Rischio/trade %” è un limite di sicurezza: blocca l'ingresso se "
+                    "distanza SL × unità supera quella percentuale dell'equity; non calcola automaticamente la size."
+                )
                 with st.container(horizontal=True):
                     capital = st.number_input("Capitale", min_value=1.0, value=float(cfg.starting_capital), step=1000.0)
                     size = st.number_input("Unità", min_value=.01, value=float(cfg.position_size_units), step=.1)
@@ -442,38 +552,45 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     ))
                     st.rerun(scope="fragment")
 
-            trades = selected_account.trades_frame()
-            st.subheader("Trade history")
-            if trades.empty:
-                st.caption("Nessun trade chiuso per ora.")
+            st.subheader("Registro completo dei trade")
+            st.caption("Tutte le posizioni aperte e tutti i trade chiusi, riuniti per ogni modello paper.")
+            ledger = _all_trades_frame(runtime, tick, service.display_timezone)
+            if ledger.empty:
+                st.caption("Nessun trade aperto o chiuso per ora.")
             else:
-                history = trades.sort_values("exit_time", ascending=False).copy()
-                history["entry_time"] = pd.to_datetime(history["entry_time"], utc=True).dt.tz_convert(service.display_timezone)
-                history["exit_time"] = pd.to_datetime(history["exit_time"], utc=True).dt.tz_convert(service.display_timezone)
-                history = history.rename(columns={
-                    "trade_id": "Trade", "side": "Direzione", "entry_time": "Apertura",
-                    "entry_price": "Ingresso", "exit_time": "Chiusura", "exit_price": "Uscita",
-                    "quantity": "Quantità", "gross_pnl": "PnL lordo", "costs": "Costi",
-                    "net_pnl": "PnL netto", "exit_reason": "Motivo uscita",
-                })
-                visible_history = history[[
-                    "Trade", "Direzione", "Apertura", "Chiusura", "Ingresso", "Uscita",
-                    "Quantità", "PnL lordo", "Costi", "PnL netto", "Motivo uscita",
-                ]]
-                styled_history = visible_history.style.map(_pnl_color, subset=["PnL netto"])
+                with st.container(horizontal=True):
+                    status_filter = st.segmented_control(
+                        "Stato", ["TUTTI", "APERTI", "CHIUSI"], default="TUTTI",
+                        key="paper_ledger_status", required=True,
+                    )
+                    model_filter = st.multiselect(
+                        "Modelli", list(runtime.accounts), default=list(runtime.accounts),
+                        key="paper_ledger_models",
+                    )
+                visible_ledger = ledger[ledger["Modello"].isin(model_filter)]
+                if status_filter == "APERTI":
+                    visible_ledger = visible_ledger[visible_ledger["Stato"].eq("APERTO")]
+                elif status_filter == "CHIUSI":
+                    visible_ledger = visible_ledger[visible_ledger["Stato"].eq("CHIUSO")]
+                styled_ledger = visible_ledger.style.map(_pnl_color, subset=["PnL"])
                 st.dataframe(
-                    styled_history,
-                    width="stretch",
-                    hide_index=True,
+                    styled_ledger, width="stretch", hide_index=True, height=420,
                     column_config={
-                        "Apertura": st.column_config.DatetimeColumn(format="DD/MM HH:mm:ss"),
-                        "Chiusura": st.column_config.DatetimeColumn(format="DD/MM HH:mm:ss"),
+                        "Modello": st.column_config.TextColumn(pinned=True),
+                        "Apertura": st.column_config.DatetimeColumn(format="DD/MM/YY HH:mm:ss"),
+                        "Chiusura": st.column_config.DatetimeColumn(format="DD/MM/YY HH:mm:ss"),
                         "Ingresso": st.column_config.NumberColumn(format="%.2f"),
-                        "Uscita": st.column_config.NumberColumn(format="%.2f"),
+                        "Prezzo/Uscita": st.column_config.NumberColumn(format="%.2f"),
                         "Quantità": st.column_config.NumberColumn(format="%.2f"),
-                        "PnL lordo": st.column_config.NumberColumn(format="%+.2f"),
-                        "Costi": st.column_config.NumberColumn(format="%.2f"),
-                        "PnL netto": st.column_config.NumberColumn(format="%+.2f USD"),
+                        "Nozionale": st.column_config.NumberColumn(format="%.2f USD"),
+                        "Margine": st.column_config.NumberColumn(format="%.2f USD"),
+                        "SL": st.column_config.NumberColumn(format="%.2f"),
+                        "TP": st.column_config.NumberColumn(format="%.2f"),
+                        "PnL": st.column_config.NumberColumn(format="%+.2f USD"),
+                        "Costi": st.column_config.NumberColumn(format="%.2f USD"),
                     },
                 )
-                st.download_button("Esporta CSV", trades.to_csv(index=False), f"paper_{selected_account.account_id}.csv", "text/csv")
+                st.download_button(
+                    "Esporta tutto in CSV", ledger.to_csv(index=False), "paper_trades_completo.csv", "text/csv",
+                    icon=":material/download:",
+                )

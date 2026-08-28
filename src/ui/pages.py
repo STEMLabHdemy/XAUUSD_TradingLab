@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from .live_dashboard import live_market_panel
+from .live_dashboard import get_paper_runtime
+from src.modeling.training_jobs import compatible_models, list_training_jobs, start_training_job
 
 from .services import (
     ROOT, download_progress, load_experiments, load_market_range, load_model_metrics,
@@ -57,17 +62,124 @@ def experiments_page() -> None:
 
 
 def models_page() -> None:
-    st.title("Models")
-    metrics = load_model_metrics()
-    if metrics.empty:
-        st.info("No model metrics available.")
-        return
-    evaluation = st.selectbox("Evaluation", sorted(metrics.evaluation.unique()))
-    selected = metrics[metrics.evaluation.eq(evaluation)]
-    st.dataframe(selected.sort_values("brier_score"), width="stretch", hide_index=True)
-    if "roc_auc" in selected:
-        st.bar_chart(selected.set_index("model")["roc_auc"])
-    st.warning("All current models and metrics are provisional until final historical retraining.")
+    st.title("Laboratorio modelli")
+    st.caption("Avvia training temporali, confronta le metriche OOS e scegli i modelli compatibili con il paper trading.")
+    catalog_tab, train_tab, results_tab = st.tabs(["Catalogo e selezione", "Nuovo training", "Risultati"])
+
+    with catalog_tab:
+        catalog = compatible_models(ROOT)
+        if catalog.empty:
+            st.info("Non ci sono artefatti binari compatibili con il paper trading.")
+        else:
+            display = catalog.copy()
+            display.insert(0, "id", display.index.astype(str))
+            st.dataframe(
+                display.drop(columns=["artifact", "manifest"]), width="stretch", hide_index=True,
+                column_config={
+                    "roc_auc": st.column_config.NumberColumn("ROC AUC", format="%.4f"),
+                    "brier_score": st.column_config.NumberColumn("Brier (meno è meglio)", format="%.4f"),
+                    "log_loss": st.column_config.NumberColumn("Log loss", format="%.4f"),
+                    "rows": st.column_config.NumberColumn("Righe", format="%d"),
+                },
+            )
+            choices = {
+                str(index): (
+                    f"{row['model']} · {row['calibration']} · H{row['horizon']} · "
+                    f"{row['run']} · AUC {row.get('roc_auc', float('nan')):.3f}"
+                )
+                for index, row in catalog.iterrows()
+            }
+            selection_path = ROOT / "data/live/paper/model_selection.json"
+            selected_artifacts: set[str] = set()
+            if selection_path.exists():
+                try:
+                    selected_artifacts = {
+                        str(item["artifact"])
+                        for item in json.loads(selection_path.read_text(encoding="utf-8")).get("models", [])
+                    }
+                except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                    selected_artifacts = set()
+            default_ids = [
+                str(index) for index, row in catalog.iterrows()
+                if str(row["artifact"]) in selected_artifacts
+            ]
+            if not default_ids:
+                sigmoid = catalog[catalog["calibration"].eq("sigmoid") & catalog["run"].eq("Attivo")]
+                default_ids = [str(index) for index in sigmoid.index[:3]]
+            selected_ids = st.multiselect(
+                "Modelli da confrontare nel Live Paper (massimo 4)", list(choices),
+                default=default_ids, format_func=choices.get,
+            )
+            st.caption("La selezione crea account paper separati. Non invia ordini reali e non sovrascrive i modelli esistenti.")
+            if st.button("Usa questa selezione nel paper", type="primary", icon=":material/check:"):
+                if not selected_ids or len(selected_ids) > 4:
+                    st.error("Seleziona da 1 a 4 modelli.")
+                else:
+                    models = []
+                    used_labels: set[str] = set()
+                    for selected_id in selected_ids:
+                        row = catalog.loc[int(selected_id)]
+                        base_label = f"{row['model']} · H{int(row['horizon'])} · {row['calibration']}"
+                        label = base_label if base_label not in used_labels else f"{base_label} · {row['run']}"
+                        used_labels.add(label)
+                        models.append({
+                            "label": label, "artifact": row["artifact"], "manifest": row["manifest"],
+                        })
+                    selection_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = selection_path.with_suffix(".tmp")
+                    temporary.write_text(json.dumps({"models": models}, ensure_ascii=False, indent=2), encoding="utf-8")
+                    temporary.replace(selection_path)
+                    get_paper_runtime.clear()
+                    st.success("Selezione salvata. Il Live Paper userà questi modelli al prossimo accesso.")
+
+    with train_tab:
+        st.info(
+            "Il training parte in background e usa separazione temporale, walk-forward, gap e un blocco OOS intatto. "
+            "Gli artefatti finiscono in una nuova cartella: nulla viene promosso automaticamente.",
+            icon=":material/info:",
+        )
+        with st.form("new_model_training"):
+            rows = st.select_slider(
+                "Righe storiche", options=[50_000, 100_000, 250_000, 500_000, 1_000_000], value=250_000,
+                help="Più righe richiedono più tempo e memoria.",
+            )
+            horizon = st.segmented_control("Orizzonte target (minuti)", [1, 3, 5, 10, 15], default=5, required=True)
+            model_names = st.multiselect(
+                "Famiglie", ["logistic_regression", "lightgbm", "xgboost"],
+                default=["logistic_regression", "lightgbm", "xgboost"],
+            )
+            submitted = st.form_submit_button("Avvia training", type="primary", icon=":material/model_training:")
+        if submitted:
+            try:
+                job = start_training_job(ROOT, int(rows), int(horizon), list(model_names))
+                st.success(f"Training {job['run_id']} avviato in background (PID {job['pid']}).")
+            except (ValueError, OSError) as exc:
+                st.error(f"Impossibile avviare il training: {exc}")
+
+    with results_tab:
+        jobs = list_training_jobs(ROOT)
+        if not jobs:
+            st.info("Non ci sono ancora training avviati dall'interfaccia.")
+        else:
+            summary = pd.DataFrame([{key: job.get(key) for key in (
+                "run_id", "status", "started_at", "finished_at", "rows", "horizon", "models", "pid", "error"
+            )} for job in jobs])
+            st.dataframe(summary, width="stretch", hide_index=True)
+            run_id = st.selectbox("Dettaglio esecuzione", [job["run_id"] for job in jobs])
+            job = next(item for item in jobs if item["run_id"] == run_id)
+            metrics_path = Path(job["directory"]) / "results/baseline_metrics_provisional.csv"
+            if metrics_path.exists():
+                run_metrics = pd.read_csv(metrics_path)
+                evaluations = [value for value in run_metrics.evaluation.unique() if "untouched_oos" in value]
+                evaluation = st.selectbox("Valutazione", evaluations, key="training_result_evaluation")
+                selected = run_metrics[run_metrics.evaluation.eq(evaluation)].sort_values("brier_score")
+                st.dataframe(selected, width="stretch", hide_index=True)
+                if "roc_auc" in selected:
+                    st.bar_chart(selected.set_index("model")["roc_auc"])
+            with st.expander("Log del training"):
+                st.code(job.get("log") or "Log non ancora disponibile.")
+
+    st.warning("Metriche buone non garantiscono profitti: prima della promozione serve sempre una verifica economica OOS con spread e costi.")
 
 
 def _select_experiment() -> str | None:

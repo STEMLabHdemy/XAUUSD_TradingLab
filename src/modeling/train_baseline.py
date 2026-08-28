@@ -19,6 +19,7 @@ def train_baselines(
     rows: int = 100_000,
     horizon: int = 5,
     model_names: tuple[str, ...] = ("logistic_regression", "lightgbm", "xgboost"),
+    output_root: Path | None = None,
 ) -> pd.DataFrame:
     master_path = project_root / "data/processed/XAUUSD_M1_MASTER.parquet"
     market = load_recent_rows(master_path, rows)
@@ -30,8 +31,9 @@ def train_baselines(
     results: list[dict[str, object]] = []
     prediction_output = labelled.loc[oos, ["timestamp", "datetime_utc", "mid_close"]].reset_index(drop=True)
     calibration_outputs: list[pd.DataFrame] = []
-    model_dir = project_root / "models"
-    result_dir = project_root / "results"
+    artifact_root = output_root.resolve() if output_root is not None else project_root
+    model_dir = artifact_root / "models"
+    result_dir = artifact_root / "results"
     model_dir.mkdir(parents=True, exist_ok=True)
     result_dir.mkdir(parents=True, exist_ok=True)
     config = ModelConfig(n_estimators=100, max_depth=5, n_jobs=2)
@@ -127,8 +129,11 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=100_000)
     parser.add_argument("--horizon", type=int, default=5)
     parser.add_argument("--models", nargs="+", default=["logistic_regression", "lightgbm", "xgboost"])
+    parser.add_argument("--output-root", type=Path)
     args = parser.parse_args()
-    result = train_baselines(args.project_root.resolve(), args.rows, args.horizon, tuple(args.models))
+    result = train_baselines(
+        args.project_root.resolve(), args.rows, args.horizon, tuple(args.models), args.output_root
+    )
     print(result.to_string(index=False))
     return 0
 

@@ -90,6 +90,32 @@ class PaperAccountTests(unittest.TestCase):
             account.process(tick(0, 100, 101), inference(0, .9))
             self.assertIsNone(account.snapshot()["position"])
 
+    def test_manual_protection_update_is_validated_and_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.start()
+            current = tick(0, 100, 101)
+            account.process(current, inference(0, .9))
+            with self.assertRaisesRegex(ValueError, "sotto il BID"):
+                account.update_protection(current, 100, 110)
+            account.update_protection(current, 95, 110)
+            reloaded = self.account(directory)
+            position = reloaded.snapshot()["position"]
+            self.assertEqual(position["stop_loss"], 95)
+            self.assertEqual(position["take_profit"], 110)
+            self.assertEqual(reloaded.snapshot()["events"][-1]["event"], "MODIFY")
+
+    def test_manual_close_records_virtual_trade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .1))
+            account.close_manually(tick(1, 98, 99))
+            state = account.snapshot()
+            self.assertIsNone(state["position"])
+            self.assertEqual(state["trades"][-1]["exit_reason"], "manual_close")
+            self.assertEqual(state["last_reason"], "chiusura manuale")
+
     def test_runtime_comparison_separates_realized_open_and_total_pnl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             account = self.account(directory)
