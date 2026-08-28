@@ -97,7 +97,9 @@ def live_candlestick_figure(
         line_dash="dot", annotation_text=f" {_price(float(latest.mid_close))}",
         annotation_position="right", row=1, col=1,
     )
-    uirevision = f"{timeframe}-{int(latest.timestamp)}" if auto_follow else f"{timeframe}-manual"
+    # Stable across market updates so Plotly preserves client-side zoom and pan.
+    # Switching timeframe/follow mode deliberately creates a fresh viewport.
+    uirevision = f"xauusd-{timeframe}-{'follow' if auto_follow else 'manual'}-v2"
     figure.update_layout(
         height=680,
         margin={"l": 12, "r": 58, "t": 15, "b": 12},
@@ -150,7 +152,12 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         auto_follow = st.toggle(
             "Segui il prezzo", value=True, key=f"live_follow_{show_paper_controls}",
             persist_state="session",
+            help="Segue il mercato finché non fai zoom o pan. Cambia questo interruttore per ripristinare la vista.",
         )
+    # Reserve stable UI locations before the slower MT5/model work. This keeps
+    # the previous chart mounted while the next realtime update is computed.
+    market_header_slot = st.container()
+    chart_slot = st.container()
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
@@ -167,38 +174,39 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     now = pd.Timestamp(datetime.now(timezone.utc))
     age_seconds = max(0.0, (now - tick.datetime_utc).total_seconds())
     offset_hours = (snapshot.status.server_utc_offset_seconds or 0) / 3600
-    with st.container(horizontal=True, vertical_alignment="center"):
-        st.badge("MT5 connesso", icon=":material/check_circle:", color="green")
-        st.badge("Conto demo" if snapshot.status.account_demo else "Conto non-demo", color="blue" if snapshot.status.account_demo else "red")
-        st.badge("Ordini Python disabilitati", icon=":material/lock:", color="gray")
-        validation = snapshot.m5_validation
-        st.badge(
-            f"M5 verificato ({validation['matched_bars']} barre)" if validation.get("valid") else "M5 da verificare",
-            icon=":material/verified:" if validation.get("valid") else ":material/warning:",
-            color="green" if validation.get("valid") else "orange",
+    with market_header_slot:
+        with st.container(horizontal=True, vertical_alignment="center"):
+            st.badge("MT5 connesso", icon=":material/check_circle:", color="green")
+            st.badge("Conto demo" if snapshot.status.account_demo else "Conto non-demo", color="blue" if snapshot.status.account_demo else "red")
+            st.badge("Ordini Python disabilitati", icon=":material/lock:", color="gray")
+            validation = snapshot.m5_validation
+            st.badge(
+                f"M5 verificato ({validation['matched_bars']} barre)" if validation.get("valid") else "M5 da verificare",
+                icon=":material/verified:" if validation.get("valid") else ":material/warning:",
+                color="green" if validation.get("valid") else "orange",
+            )
+            st.caption(f"{snapshot.status.server} · {snapshot.status.symbol} · server UTC{offset_hours:+g}")
+
+        with st.container(horizontal=True):
+            st.metric("BID", _price(tick.bid), border=True)
+            st.metric("ASK", _price(tick.ask), border=True)
+            st.metric("Spread", _price(tick.spread), border=True)
+            st.metric("Ultimo tick", f"{local_tick:%H:%M:%S}", f"{age_seconds:.1f}s", delta_color="off", border=True)
+
+        st.caption(
+            f"Ora grafico: {local_tick:%d/%m/%Y %H:%M:%S} Europe/Rome · "
+            f"UTC: {tick.datetime_utc:%d/%m/%Y %H:%M:%S} · feed MT5 del broker"
         )
-        st.caption(f"{snapshot.status.server} · {snapshot.status.symbol} · server UTC{offset_hours:+g}")
-
-    with st.container(horizontal=True):
-        st.metric("BID", _price(tick.bid), border=True)
-        st.metric("ASK", _price(tick.ask), border=True)
-        st.metric("Spread", _price(tick.spread), border=True)
-        st.metric("Ultimo tick", f"{local_tick:%H:%M:%S}", f"{age_seconds:.1f}s", delta_color="off", border=True)
-
-    st.caption(
-        f"Ora grafico: {local_tick:%d/%m/%Y %H:%M:%S} Europe/Rome · "
-        f"UTC: {tick.datetime_utc:%d/%m/%Y %H:%M:%S} · feed MT5 del broker"
-    )
-    selected_model = next(iter(runtime.accounts))
-    if show_paper_controls:
-        selected_model = st.selectbox("Paper account / modello", list(runtime.accounts), key="paper_selected_model")
+        selected_model = next(iter(runtime.accounts))
+        if show_paper_controls:
+            selected_model = st.selectbox("Paper account / modello", list(runtime.accounts), key="paper_selected_model")
     selected_account = runtime.accounts[selected_model]
     selected_state = selected_account.snapshot()
     figure = live_candlestick_figure(
         snapshot.m1_bars, str(timeframe), service.display_timezone, int(visible), bool(auto_follow),
         selected_account.events_frame() if show_paper_controls else None,
     )
-    st.plotly_chart(
+    chart_slot.plotly_chart(
         figure,
         width="stretch",
         height=680,
