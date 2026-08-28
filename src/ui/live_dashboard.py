@@ -303,7 +303,11 @@ def get_live_service(project_root: str) -> LiveMarketService:
 
 
 @st.cache_resource
-def get_paper_runtime(project_root: str) -> PaperRuntime:
+def get_paper_runtime(project_root: str, runtime_schema_version: int) -> PaperRuntime:
+    # The explicit version is part of Streamlit's cache key. Increment it when
+    # PaperRuntime/PaperAccount gain methods so hot reload cannot reuse an
+    # instance of the previous class definition.
+    _ = runtime_schema_version
     root = Path(project_root)
     values = yaml.safe_load((root / "configs/paper.yaml").read_text(encoding="utf-8")) or {}
     return PaperRuntime(root, PaperConfig(**values))
@@ -332,7 +336,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=2)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:
@@ -395,7 +399,10 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         )
 
     inference = snapshot.inference
-    paper_inference = runtime.inference_for(selected_model) if show_paper_controls else None
+    paper_inference = (
+        getattr(runtime, "_inferences", {}).get(selected_model)
+        if show_paper_controls else None
+    )
     displayed_inference = paper_inference or inference
     with st.container(border=True):
         st.subheader("Inference realtime", help="Si aggiorna una volta per ogni candela M1 completata.")
