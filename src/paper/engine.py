@@ -387,6 +387,11 @@ class PaperRuntime:
             })
         return pd.DataFrame(rows)
 
+    def inference_for(self, model: str) -> LiveInference | None:
+        """Return the latest inference produced by a selected paper model."""
+        with self._lock:
+            return self._inferences.get(model)
+
     def reconfigure_and_reset(self, config: PaperConfig) -> None:
         """Apply one fair configuration to every model and start fresh experiments."""
         config.validate()

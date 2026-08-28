@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from threading import RLock
 
 import pandas as pd
 
@@ -130,6 +131,14 @@ class PaperAccountTests(unittest.TestCase):
             self.assertAlmostEqual(row.total_pnl, row.realized_pnl + row.unrealized_pnl)
             self.assertAlmostEqual(row.return_pct, row.total_pnl / account.config.starting_capital)
             self.assertEqual(row.position, "LONG")
+
+    def test_runtime_exposes_selected_model_inference(self) -> None:
+        runtime = PaperRuntime.__new__(PaperRuntime)
+        expected = inference(0, .7)
+        runtime._inferences = {"XGBoost H15": expected}
+        runtime._lock = RLock()
+        self.assertIs(runtime.inference_for("XGBoost H15"), expected)
+        self.assertIsNone(runtime.inference_for("missing"))
 
 
 if __name__ == "__main__":

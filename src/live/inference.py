@@ -66,5 +66,5 @@ class LiveInferenceEngine:
         return LiveInference(
             True, str(model_name), horizon, probability,
             pd.Timestamp(completed_m1.datetime_utc.iloc[-1]), candidate, "NO_TRADE",
-            "Solo il modello 5m è disponibile; conferma multi-orizzonte non ancora possibile",
+            f"Modello singolo H{horizon}; conferma multi-orizzonte non ancora disponibile",
         )

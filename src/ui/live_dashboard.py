@@ -395,21 +395,43 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         )
 
     inference = snapshot.inference
+    paper_inference = runtime.inference_for(selected_model) if show_paper_controls else None
+    displayed_inference = paper_inference or inference
     with st.container(border=True):
         st.subheader("Inference realtime", help="Si aggiorna una volta per ogni candela M1 completata.")
-        with st.container(horizontal=True):
-            st.metric("P_up 1m", "N/D", border=True)
-            st.metric("P_up 3m", "N/D", border=True)
-            st.metric("P_up 5m", f"{inference.probability_up:.1%}" if inference.probability_up is not None else "N/D", border=True)
-            st.metric("P_up 10m", "N/D", border=True)
-            st.metric("Segnale paper", selected_state["last_signal"] if show_paper_controls else inference.final_signal, border=True)
-        if inference.available:
-            inference_local = inference.inference_time_utc.tz_convert(service.display_timezone) if inference.inference_time_utc is not None else None
+        if show_paper_controls:
+            with st.container(horizontal=True):
+                st.metric("Modello selezionato", selected_model, border=True)
+                st.metric(
+                    "Orizzonte previsto",
+                    f"{displayed_inference.horizon_minutes} minuti" if displayed_inference.horizon_minutes else "N/D",
+                    border=True,
+                )
+                st.metric(
+                    f"P_up {displayed_inference.horizon_minutes or '?'}m",
+                    f"{displayed_inference.probability_up:.1%}" if displayed_inference.probability_up is not None else "N/D",
+                    border=True,
+                )
+                st.metric("Segnale paper", selected_state["last_signal"], border=True)
             st.caption(
-                f"Modello: {inference.model} · candidato: {inference.candidate} · "
+                "La previsione viene aggiornata a ogni candela M1 completa; l'orizzonte indica quanto avanti "
+                "nel tempo il modello cerca di prevedere, non ogni quanto viene eseguito."
+            )
+        else:
+            with st.container(horizontal=True):
+                st.metric(
+                    f"P_up {displayed_inference.horizon_minutes or '?'}m",
+                    f"{displayed_inference.probability_up:.1%}" if displayed_inference.probability_up is not None else "N/D",
+                    border=True,
+                )
+                st.metric("Segnale", displayed_inference.final_signal, border=True)
+        if displayed_inference.available:
+            inference_local = displayed_inference.inference_time_utc.tz_convert(service.display_timezone) if displayed_inference.inference_time_utc is not None else None
+            st.caption(
+                f"Modello: {displayed_inference.model} · candidato: {displayed_inference.candidate} · "
                 f"ultima candela elaborata: {inference_local:%d/%m/%Y %H:%M} Europe/Rome"
             )
-        st.warning(inference.reason, icon=":material/science:")
+        st.warning(displayed_inference.reason, icon=":material/science:")
 
     if show_paper_controls:
         with st.container(border=True):
