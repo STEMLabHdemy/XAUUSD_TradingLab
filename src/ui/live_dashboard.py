@@ -212,7 +212,7 @@ def live_candlestick_figure(
     )
     # Stable across market updates so Plotly preserves client-side zoom and pan.
     # Switching timeframe/follow mode deliberately creates a fresh viewport.
-    uirevision = f"xauusd-{timeframe}-{'follow' if auto_follow else 'manual'}-v3"
+    uirevision = f"xauusd-{timeframe}-{'follow' if auto_follow else 'manual'}-v5"
     figure.update_layout(
         height=680,
         margin={"l": 12, "r": 58, "t": 15, "b": 12},
