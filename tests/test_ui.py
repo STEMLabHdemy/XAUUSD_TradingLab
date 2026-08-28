@@ -26,6 +26,8 @@ class UISmokeTests(unittest.TestCase):
         manual = live_candlestick_figure(second, "M1", "Europe/Rome", 10, False)
         self.assertEqual(figure_a.layout.uirevision, figure_b.layout.uirevision)
         self.assertNotEqual(figure_b.layout.uirevision, manual.layout.uirevision)
+        self.assertGreater(figure_a.layout.yaxis.domain[0], figure_a.layout.yaxis2.domain[1])
+        self.assertFalse(figure_a.layout.xaxis.rangeslider.visible)
 
 
 if __name__ == "__main__":

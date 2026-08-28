@@ -22,41 +22,74 @@ type Instance = {
   revision: string;
   rendering: boolean;
   listenerAttached: boolean;
+  pendingData?: ComponentData;
+  resizeObserver?: ResizeObserver;
   relayoutHandler: (update: Record<string, unknown>) => void;
 };
 
 const instances = new WeakMap<FrontendRendererArgs["parentElement"], Instance>();
-const axes = ["xaxis", "xaxis2", "yaxis", "yaxis2"];
+const viewportAxes = ["xaxis", "yaxis"];
+
+function axisRange(update: Record<string, unknown>, axis: string): [unknown, unknown] | undefined {
+  const combined = update[`${axis}.range`];
+  if (Array.isArray(combined) && combined.length === 2) {
+    return [combined[0], combined[1]];
+  }
+  const start = update[`${axis}.range[0]`];
+  const end = update[`${axis}.range[1]`];
+  return start !== undefined && end !== undefined ? [start, end] : undefined;
+}
 
 function captureViewport(instance: Instance, update: Record<string, unknown>): void {
   if (instance.rendering) return;
-  for (const axis of axes) {
+  for (const axis of viewportAxes) {
     if (update[`${axis}.autorange`] === true) {
       instance.viewport[axis] = { autorange: true };
       continue;
     }
-    const start = update[`${axis}.range[0]`];
-    const end = update[`${axis}.range[1]`];
-    if (start !== undefined && end !== undefined) {
-      instance.viewport[axis] = { autorange: false, range: [start, end] };
+    const range = axisRange(update, axis);
+    if (range) {
+      instance.viewport[axis] = { autorange: false, range };
     }
   }
 }
 
 function applyViewport(layout: Record<string, unknown>, viewport: Viewport): void {
-  for (const axis of axes) {
+  for (const axis of viewportAxes) {
     const saved = viewport[axis];
     if (!saved) continue;
-    const axisLayout = { ...((layout[axis] as Record<string, unknown>) || {}) };
-    if (saved.autorange) {
-      axisLayout.autorange = true;
-      delete axisLayout.range;
-    } else if (saved.range) {
-      axisLayout.autorange = false;
-      axisLayout.range = saved.range;
+    const linkedAxes = axis === "xaxis" ? ["xaxis", "xaxis2"] : [axis];
+    for (const linkedAxis of linkedAxes) {
+      const axisLayout = { ...((layout[linkedAxis] as Record<string, unknown>) || {}) };
+      if (saved.autorange) {
+        axisLayout.autorange = true;
+        delete axisLayout.range;
+      } else if (saved.range) {
+        axisLayout.autorange = false;
+        axisLayout.range = saved.range;
+      }
+      layout[linkedAxis] = axisLayout;
     }
-    layout[axis] = axisLayout;
   }
+}
+
+function renderLatest(instance: Instance): void {
+  if (instance.rendering || !instance.pendingData) return;
+  const data = instance.pendingData;
+  instance.pendingData = undefined;
+  const layout = structuredClone(data.figure.layout || {}) as Record<string, unknown>;
+  applyViewport(layout, instance.viewport);
+  layout.autosize = true;
+  delete layout.width;
+  instance.rendering = true;
+  void Plotly.react(instance.plot, data.figure.data || [], layout, data.config || {}).finally(() => {
+    instance.rendering = false;
+    if (!instance.listenerAttached) {
+      instance.plot.on("plotly_relayout", instance.relayoutHandler);
+      instance.listenerAttached = true;
+    }
+    renderLatest(instance);
+  });
 }
 
 const RealtimeChart: FrontendRenderer<FrontendState, ComponentData> = (args) => {
@@ -75,6 +108,10 @@ const RealtimeChart: FrontendRenderer<FrontendState, ComponentData> = (args) => 
       relayoutHandler: (_update: Record<string, unknown>): void => {},
     };
     created.relayoutHandler = (update) => captureViewport(created, update);
+    created.resizeObserver = new ResizeObserver(() => {
+      if (!created.rendering) void Plotly.Plots.resize(created.plot);
+    });
+    created.resizeObserver.observe(plot);
     instance = created;
     instances.set(parentElement, instance);
   }
@@ -84,18 +121,11 @@ const RealtimeChart: FrontendRenderer<FrontendState, ComponentData> = (args) => 
     instance.revision = data.viewportRevision;
   }
 
-  const layout = structuredClone(data.figure.layout || {}) as Record<string, unknown>;
-  applyViewport(layout, instance.viewport);
-  instance.rendering = true;
-  void Plotly.react(plot, data.figure.data || [], layout, data.config || {}).finally(() => {
-    if (instance) {
-      instance.rendering = false;
-      if (!instance.listenerAttached) {
-        plot.on("plotly_relayout", instance.relayoutHandler);
-        instance.listenerAttached = true;
-      }
-    }
-  });
+  // Realtime fragment reruns can arrive before Plotly finishes drawing. Keep
+  // only the newest payload and render sequentially so stale async draws cannot
+  // overwrite the current axes or subplot domains.
+  instance.pendingData = data;
+  renderLatest(instance);
 
   return () => {
     // Do not purge on data updates: this persistent node preserves zoom.
