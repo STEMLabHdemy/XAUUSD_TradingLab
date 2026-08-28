@@ -23,9 +23,15 @@ read-only MetaTrader 5 connection for realtime XAUUSD BID/ASK ticks and complete
 M1 candles, automatic broker-clock normalization to UTC, Europe/Rome display,
 atomic local live storage, M1/M5 charts, and provisional 5-minute inference.
 M1-to-M5 aggregation is checked against native MT5 M5 candles. Real broker order
-routing is absent; the final signal remains `NO_TRADE` until genuine
-multi-horizon models are available. Phase 7 paper-account execution is still
-pending.
+routing is absent.
+
+Phase 7 adds persistent realtime paper accounts for LightGBM, Logistic Regression,
+and XGBoost. All three receive the same MT5 feed while maintaining independent
+positions, balance, equity, margin, drawdown, trades, and risk controls. Virtual
+execution is BID/ASK-aware and includes configurable slippage and commission;
+BUY/SELL/EXIT markers and CSV trade export are available in Live Paper. The
+current models remain provisional single-horizon 5-minute models, so their paper
+results are evidence to collect, not a production trading recommendation.
 
 ## Setup
 
@@ -45,6 +51,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_app.ps1
 The dashboard reads the already-open MT5 session; account passwords are never
 stored in the project. Completed broker candles are written under `data/live/`,
 which is intentionally excluded from Git.
+
+Open **Live Paper**, choose a model, then click **Avvia paper**. Account state is
+saved under `data/live/paper/` and survives browser refreshes and application
+restarts. Configuration changes deliberately require confirmation and reset all
+three accounts so their comparison remains fair.
 
 ## Full history download (manual only)
 

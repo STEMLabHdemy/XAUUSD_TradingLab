@@ -147,6 +147,6 @@ def settings_page() -> None:
     st.checkbox("Auto update recent historical data on startup", value=True, disabled=True, help="Will update only recent months; full history is never launched by the GUI.")
     st.toggle("ENABLE_LIVE_TRADING", value=False, disabled=True)
     st.info("Real-money order routing is intentionally unavailable.")
-    for name in ("data", "features", "models", "training", "strategy", "backtest", "live"):
+    for name in ("data", "features", "models", "training", "strategy", "backtest", "paper", "live"):
         with st.expander(f"configs/{name}.yaml"):
             st.code((ROOT / "configs" / f"{name}.yaml").read_text(encoding="utf-8"), language="yaml")

@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+from src.live.inference import LiveInference
+from src.live.mt5_client import MarketTick
+from src.paper import PaperAccount, PaperConfig
+
+
+def tick(minute: int, bid: float, ask: float) -> MarketTick:
+    stamp = pd.Timestamp("2026-08-28 10:00", tz="UTC") + pd.Timedelta(minutes=minute)
+    return MarketTick(stamp, stamp, bid, ask, ask - bid, "XAUUSD")
+
+
+def inference(minute: int, probability: float) -> LiveInference:
+    stamp = pd.Timestamp("2026-08-28 09:59", tz="UTC") + pd.Timedelta(minutes=minute)
+    return LiveInference(True, "test", 5, probability, stamp, "BUY", "NO_TRADE", "test")
+
+
+class PaperAccountTests(unittest.TestCase):
+    def account(self, directory: str, **overrides) -> PaperAccount:
+        values = {
+            "persistence": 1, "cooldown_minutes": 0, "slippage_price_per_side": .1,
+            "commission_per_unit_per_side": .2, "position_size_units": 2,
+            "stop_loss_price": 5, "take_profit_price": 10,
+        }
+        values.update(overrides)
+        return PaperAccount("test", "TestModel", PaperConfig(**values), Path(directory))
+
+    def test_long_uses_ask_entry_bid_exit_and_costs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            state = account.snapshot()
+            self.assertEqual(state["position"]["raw_entry_price"], 101)
+            self.assertEqual(state["position"]["entry_price"], 101.1)
+            account.process(tick(1, 104, 105), inference(1, .1))
+            trade = account.trades_frame().iloc[0]
+            self.assertEqual(trade.raw_exit_price, 104)
+            self.assertEqual(trade.exit_price, 103.9)
+            self.assertAlmostEqual(trade.gross_pnl, 6.0)
+            self.assertAlmostEqual(trade.costs, 1.2)
+            self.assertAlmostEqual(trade.net_pnl, 4.8)
+            self.assertAlmostEqual(account.snapshot()["balance"], 100004.8)
+
+    def test_short_uses_bid_entry_ask_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .1))
+            self.assertEqual(account.snapshot()["position"]["entry_price"], 99.9)
+            account.process(tick(1, 96, 97), inference(1, .9))
+            trade = account.trades_frame().iloc[0]
+            self.assertEqual(trade.raw_exit_price, 97)
+            self.assertEqual(trade.exit_price, 97.1)
+            self.assertAlmostEqual(trade.net_pnl, 4.8)
+
+    def test_same_completed_bar_cannot_open_twice_and_state_reloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(0, 100, 101), inference(0, .9))
+            self.assertEqual(account.snapshot()["next_trade_id"], 2)
+            reloaded = self.account(directory)
+            self.assertEqual(reloaded.snapshot()["position"]["trade_id"], 1)
+            self.assertTrue(reloaded.snapshot()["running"])
+
+    def test_mark_to_market_margin_and_stop_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, leverage=10)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(0, 102, 103), inference(0, .9))
+            state = account.snapshot()
+            self.assertGreater(state["unrealized_pnl"], 0)
+            self.assertAlmostEqual(state["used_margin"], 20.4)
+            account.process(tick(1, 95, 96), inference(1, .9))
+            self.assertIsNone(account.snapshot()["position"])
+            self.assertEqual(account.trades_frame().iloc[0].exit_reason, "stop_loss")
+
+    def test_stopped_account_never_opens(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.process(tick(0, 100, 101), inference(0, .9))
+            self.assertIsNone(account.snapshot()["position"])
+
+
+if __name__ == "__main__":
+    unittest.main()
