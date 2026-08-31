@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from datetime import time
 import hashlib
 import json
 import math
@@ -34,6 +35,9 @@ class PaperConfig:
     cooldown_minutes: int = 3
     probability_exit_threshold: float = .50
     entry_mode: str = "controlled"
+    session_flatten_enabled: bool = True
+    session_flatten_local_time: str = "22:55"
+    session_timezone: str = "Europe/Rome"
 
     def validate(self) -> None:
         if self.starting_capital <= 0 or self.position_size_units <= 0 or self.leverage <= 0:
@@ -48,6 +52,10 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
+        try:
+            time.fromisoformat(self.session_flatten_local_time)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Session flatten time must be HH:MM or HH:MM:SS") from exc
 
     @property
     def entry_rules(self) -> tuple[int, int, int]:
@@ -224,6 +232,25 @@ class PaperAccount:
             self._mark(tick, save=False)
             self._save()
 
+    def close_all_for_session(self, tick: MarketTick) -> int:
+        """Flatten every virtual leg, retaining each one in the trade ledger."""
+        with self._lock:
+            closed = self._close_all(tick, "session_close")
+            self.state["last_signal"] = "EXIT" if closed else "NO_TRADE"
+            self.state["last_reason"] = (
+                f"session close: {closed} position(s) closed at last available tick"
+                if closed else "session close: no open positions"
+            )
+            self._mark(tick, save=False)
+            self._save()
+            return closed
+
+    def _session_flatten_active(self, tick: MarketTick) -> bool:
+        if not self.config.session_flatten_enabled:
+            return False
+        local_time = tick.datetime_utc.tz_convert(self.config.session_timezone).time()
+        return local_time >= time.fromisoformat(self.config.session_flatten_local_time)
+
     def _today_stats(self, timestamp: pd.Timestamp) -> tuple[int, float]:
         day = timestamp.strftime("%Y-%m-%d")
         trades = [row for row in self.state["trades"] if str(row["exit_time"]).startswith(day)]
@@ -313,6 +340,9 @@ class PaperAccount:
             self._mark(tick, save=False)
             if not self.state["running"]:
                 self._save()
+                return
+            if self._session_flatten_active(tick):
+                self.close_all_for_session(tick)
                 return
             protective_exits = 0
             for position in list(self._positions()):
@@ -511,6 +541,11 @@ class PaperRuntime:
             for engine in self.engines.values():
                 if isinstance(engine, LiveInferenceEngine):
                     engine.buy_threshold, engine.sell_threshold = config.buy_threshold, config.sell_threshold
+
+    def close_all_for_session(self, tick: MarketTick) -> dict[str, int]:
+        """Flatten all paper accounts at one observed virtual market tick."""
+        with self._lock:
+            return {name: account.close_all_for_session(tick) for name, account in self.accounts.items()}
 
     def reconfigure_and_reset(self, config: PaperConfig) -> None:
         """Apply one fair configuration to every model and start fresh experiments."""

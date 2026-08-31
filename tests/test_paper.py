@@ -118,6 +118,23 @@ class PaperAccountTests(unittest.TestCase):
             self.assertEqual(state["trades"][-1]["exit_reason"], "manual_close")
             self.assertEqual(state["last_reason"], "chiusura manuale")
 
+    def test_session_close_flattens_all_legs_and_blocks_late_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="burst")
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(1, 100, 101), inference(1, .9))
+            session_tick = MarketTick(
+                pd.Timestamp("2026-08-28 20:55", tz="UTC"),
+                pd.Timestamp("2026-08-28 20:55", tz="UTC"), 100, 101, 1, "XAUUSD",
+            )
+            account.process(session_tick, inference(2, .9))
+            state = account.snapshot()
+            self.assertEqual(state["positions"], [])
+            self.assertEqual(len(state["trades"]), 2)
+            self.assertTrue(all(row["exit_reason"] == "session_close" for row in state["trades"]))
+            self.assertEqual(state["last_reason"], "session close: 2 position(s) closed at last available tick")
+
     def test_runtime_comparison_separates_realized_open_and_total_pnl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             account = self.account(directory)

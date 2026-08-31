@@ -16,3 +16,6 @@ persistence: 2
 cooldown_minutes: 3
 probability_exit_threshold: 0.50
 entry_mode: burst
+session_flatten_enabled: true
+session_flatten_local_time: "22:55"
+session_timezone: Europe/Rome
