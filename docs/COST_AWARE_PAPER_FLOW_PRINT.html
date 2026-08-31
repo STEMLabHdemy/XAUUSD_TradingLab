@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <title>XAUUSD TradingLab — Flowchart cost-aware paper</title>
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; color: #10213b; margin: 0; }
+    h1 { margin: 0 0 3px; font-size: 24px; color: #0b5d75; }
+    .sub { margin: 0 0 10px; color: #4b5f78; font-size: 12px; }
+    .warn { padding: 7px 10px; border-left: 4px solid #dc8c00; background: #fff6df; font-size: 11px; }
+    svg { display: block; width: 100%; height: 455px; margin-top: 7px; }
+    .notes { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 5px; }
+    .note { border: 1px solid #c7d6e6; border-radius: 6px; padding: 7px 9px; font-size: 10px; line-height: 1.35; }
+    .note b { color: #0b5d75; }
+    .footer { margin-top: 6px; font-size: 9px; color: #60748a; }
+    .lane { fill: #f5f9fc; stroke: #bdd3e6; stroke-width: 1.5; }
+    .title { font-size: 13px; font-weight: bold; fill: #0b5d75; }
+    .box { fill: white; stroke: #3d7293; stroke-width: 1.5; rx: 8; }
+    .input { fill: #e8f6fb; }
+    .model { fill: #eef0ff; stroke: #5c62b5; }
+    .decision { fill: #fff5df; stroke: #bd7f13; }
+    .output { fill: #e9f8ef; stroke: #30805b; }
+    .stop { fill: #fcebed; stroke: #b64b5a; }
+    .label { font-size: 10px; font-weight: bold; fill: #18334d; text-anchor: middle; }
+    .small { font-size: 8.5px; font-weight: normal; }
+    .edge { stroke: #526d84; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+    .edge-label { font-size: 8px; fill: #40576b; }
+  </style>
+</head>
+<body>
+  <h1>XAUUSD TradingLab — Flowchart del modello cost-aware nel Paper</h1>
+  <p class="sub">Modello attivo: XGBoost shallow H15 · classi UP / DOWN / NEUTRAL · esecuzione esclusivamente virtuale</p>
+  <div class="warn"><b>Research-only:</b> il modello è stato addestrato correttamente su dati temporali e cost-aware, ma non ha ancora superato l’audit economico per il trading reale. Nessun ordine viene mai inviato a MT5 o Trading212.</div>
+
+  <svg viewBox="0 0 1120 455" role="img" aria-label="Flowchart del modello cost-aware">
+    <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#526d84"/></marker></defs>
+    <rect class="lane" x="5" y="20" width="285" height="405" rx="10"/>
+    <rect class="lane" x="300" y="20" width="390" height="405" rx="10"/>
+    <rect class="lane" x="700" y="20" width="415" height="405" rx="10"/>
+    <text class="title" x="18" y="42">1 · TRAINING OFFLINE</text>
+    <text class="title" x="313" y="42">2 · INFERENCE LIVE (ogni M1 completata)</text>
+    <text class="title" x="713" y="42">3 · PAPER ENGINE (raffica, virtuale)</text>
+
+    <rect class="box input" x="37" y="65" width="220" height="48"/><text class="label" x="147" y="84">Storico XAUUSD M1<tspan x="147" dy="13" class="small">BID / ASK / spread</tspan></text>
+    <rect class="box input" x="37" y="145" width="220" height="68"/><text class="label" x="147" y="164">FeatureEngine causale<tspan x="147" dy="13" class="small">ritorni, candele, ATR, volatilità, EMA, RSI</tspan><tspan x="147" dy="11" class="small">MACD, Bollinger, spread, ora e sessione</tspan></text>
+    <rect class="box decision" x="37" y="246" width="220" height="62"/><text class="label" x="147" y="265">Target cost-aware H15<tspan x="147" dy="13" class="small">movimento copre BID/ASK + slippage?</tspan><tspan x="147" dy="11" class="small">UP · DOWN · NEUTRAL</tspan></text>
+    <rect class="box model" x="37" y="340" width="220" height="50"/><text class="label" x="147" y="359">XGBoost shallow<tspan x="147" dy="13" class="small">classificatore a tre classi</tspan></text>
+    <path class="edge" d="M147 113 L147 145"/><path class="edge" d="M147 213 L147 246"/><path class="edge" d="M147 308 L147 340"/>
+
+    <rect class="box input" x="333" y="65" width="155" height="50"/><text class="label" x="410" y="84">MT5 broker<tspan x="410" dy="13" class="small">tick BID/ASK + M1</tspan></text>
+    <rect class="box decision" x="515" y="65" width="150" height="50"/><text class="label" x="590" y="84">Candela M1<tspan x="590" dy="13" class="small">completata?</tspan></text>
+    <rect class="box input" x="333" y="155" width="155" height="58"/><text class="label" x="410" y="174">FeatureEngine<tspan x="410" dy="13" class="small">stesse feature</tspan><tspan x="410" dy="11" class="small">solo passato</tspan></text>
+    <rect class="box model" x="515" y="155" width="150" height="58"/><text class="label" x="590" y="174">XGBoost H15<tspan x="590" dy="13" class="small">P(DOWN), P(NEUTRAL),</tspan><tspan x="590" dy="11" class="small">P(UP)</tspan></text>
+    <rect class="box decision" x="405" y="266" width="190" height="58"/><text class="label" x="500" y="285">Classe con probabilità più alta<tspan x="500" dy="14" class="small">DOWN → SELL · NEUTRAL → HOLD · UP → BUY</tspan></text>
+    <path class="edge" d="M488 90 L515 90"/><text class="edge-label" x="493" y="82">tick fresco</text><path class="edge" d="M590 115 L590 155"/><path class="edge" d="M410 115 L410 155"/><path class="edge" d="M488 184 L515 184"/><path class="edge" d="M590 213 L520 266"/>
+
+    <rect class="box decision" x="728" y="65" width="165" height="58"/><text class="label" x="810" y="84">Guardrail<tspan x="810" dy="13" class="small">spread · margine · rischio</tspan><tspan x="810" dy="11" class="small">limite giornaliero</tspan></text>
+    <rect class="box stop" x="942" y="65" width="145" height="58"/><text class="label" x="1014" y="84">NO TRADE / HOLD<tspan x="1014" dy="13" class="small">vincolo non rispettato</tspan></text>
+    <rect class="box output" x="728" y="165" width="165" height="62"/><text class="label" x="810" y="184">Raffica<tspan x="810" dy="13" class="small">una nuova posizione/M1</tspan><tspan x="810" dy="11" class="small">max 10 stesso verso</tspan></text>
+    <rect class="box output" x="942" y="165" width="145" height="62"/><text class="label" x="1014" y="184">Apri virtuale<tspan x="1014" dy="13" class="small">BID/ASK + slippage</tspan><tspan x="1014" dy="11" class="small">SL e TP</tspan></text>
+    <rect class="box input" x="728" y="285" width="165" height="58"/><text class="label" x="810" y="304">Mark-to-market<tspan x="810" dy="13" class="small">a ogni tick</tspan><tspan x="810" dy="11" class="small">PnL aperto</tspan></text>
+    <rect class="box decision" x="942" y="285" width="145" height="58"/><text class="label" x="1014" y="304">Uscita?<tspan x="1014" dy="13" class="small">SL · TP · inversione</tspan><tspan x="1014" dy="11" class="small">manuale</tspan></text>
+    <rect class="box output" x="820" y="370" width="180" height="38"/><text class="label" x="910" y="386">Ledger: trade, PnL, equity, margine, drawdown</text>
+    <path class="edge" d="M595 295 L728 95"/><path class="edge" d="M893 94 L942 94"/><text class="edge-label" x="900" y="86">KO</text><path class="edge" d="M810 123 L810 165"/><text class="edge-label" x="816" y="148">OK</text><path class="edge" d="M893 196 L942 196"/><path class="edge" d="M1014 227 L1014 285"/><path class="edge" d="M942 314 L893 314"/><path class="edge" d="M1014 343 L970 370"/><path class="edge" d="M810 343 L850 370"/>
+  </svg>
+
+  <div class="notes">
+    <div class="note"><b>Input.</b> Il modello non vede il futuro e non “guarda” il grafico: riceve soltanto feature numeriche generate da candele già chiuse.</div>
+    <div class="note"><b>Output.</b> Le tre probabilità descrivono un movimento eseguibile a 15 minuti, non una promessa di profitto. La classe vincente genera BUY, SELL o HOLD.</div>
+    <div class="note"><b>Limite cruciale.</b> Gli audit storici non hanno ancora validato redditività dopo costi. Il flusso serve a raccogliere evidenza in Paper, non a gestire denaro reale.</div>
+  </div>
+  <div class="footer">XAUUSD TradingLab · documento generato dal repository · ordini broker Python disabilitati</div>
+</body>
+</html>

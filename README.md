@@ -34,7 +34,8 @@ current models remain provisional single-horizon 5-minute models, so their paper
 results are evidence to collect, not a production trading recommendation.
 
 For the current research-only cost-aware H15 paper model, see the
-[logical flowchart](docs/COST_AWARE_PAPER_FLOW.md).
+[logical flowchart](docs/COST_AWARE_PAPER_FLOW.md) or the shareable
+[PDF version](docs/XAUUSD_Cost_Aware_Paper_Flow.pdf).
 
 ## Setup
 
