@@ -5,7 +5,7 @@ risk_per_trade_pct: 1.0
 position_size_units: 1.0
 commission_per_unit_per_side: 0.0
 slippage_price_per_side: 0.05
-max_daily_trades: 100
+max_daily_trades: null
 max_allowed_spread: 5.0
 stop_loss_price: 5.0
 take_profit_price: 10.0

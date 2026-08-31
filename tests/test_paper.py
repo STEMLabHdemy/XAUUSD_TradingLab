@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from threading import RLock
 
@@ -191,6 +192,21 @@ class PaperAccountTests(unittest.TestCase):
             self.assertEqual(len(state["positions"]), 2)
             self.assertEqual(account.config.entry_mode, "controlled")
             account.process(tick(2, 100, 101), inference(2, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 2)
+
+    def test_config_update_preserves_open_legs_and_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="burst", max_daily_trades=2)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            original_position = account.snapshot()["positions"][0]["trade_id"]
+            account.update_config_preserving_history(PaperConfig(
+                **{**asdict(account.config), "max_daily_trades": None}
+            ))
+            state = account.snapshot()
+            self.assertEqual(state["positions"][0]["trade_id"], original_position)
+            self.assertIsNone(account.config.max_daily_trades)
+            account.process(tick(1, 100, 101), inference(1, .9))
             self.assertEqual(len(account.snapshot()["positions"]), 2)
 
     def test_runtime_exposes_selected_model_inference(self) -> None:

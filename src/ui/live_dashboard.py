@@ -637,7 +637,15 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     max_spread = st.number_input("Spread massimo", min_value=0.0, value=float(cfg.max_allowed_spread), step=.1)
                     commission = st.number_input("Commissione/unità/lato", min_value=0.0, value=float(cfg.commission_per_unit_per_side), step=.01)
                     slippage = st.number_input("Slippage/lato", min_value=0.0, value=float(cfg.slippage_price_per_side), step=.01)
-                    max_trades = st.number_input("Trade max/giorno", min_value=1, value=int(cfg.max_daily_trades), step=1)
+                    no_daily_trade_limit = st.checkbox(
+                        "Nessun limite giornaliero", value=cfg.max_daily_trades is None,
+                        key="paper_no_daily_trade_limit",
+                    )
+                    max_trades = st.number_input(
+                        "Trade max/giorno", min_value=1,
+                        value=int(cfg.max_daily_trades or 100), step=1,
+                        disabled=no_daily_trade_limit,
+                    )
                     max_loss = st.number_input("Perdita max/giorno", min_value=0.0, value=float(cfg.max_daily_loss), step=100.0)
                 apply_confirm = st.checkbox("Confermo: applica e resetta tutti gli account", key="paper_config_confirm")
                 if st.button("Applica nuova configurazione", disabled=not apply_confirm, icon=":material/tune:"):
@@ -647,7 +655,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                            "buy_threshold": buy, "sell_threshold": sell, "persistence": int(persistence),
                            "cooldown_minutes": int(cooldown), "max_allowed_spread": max_spread,
                            "commission_per_unit_per_side": commission, "slippage_price_per_side": slippage,
-                           "max_daily_trades": int(max_trades), "max_daily_loss": max_loss}
+                           "max_daily_trades": None if no_daily_trade_limit else int(max_trades), "max_daily_loss": max_loss}
                     ))
                     st.rerun(scope="fragment")
 

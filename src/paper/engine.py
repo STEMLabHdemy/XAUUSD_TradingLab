@@ -23,7 +23,7 @@ class PaperConfig:
     position_size_units: float = 1.0
     commission_per_unit_per_side: float = 0.0
     slippage_price_per_side: float = 0.05
-    max_daily_trades: int = 20
+    max_daily_trades: int | None = 20
     max_allowed_spread: float = 5.0
     stop_loss_price: float | None = 5.0
     take_profit_price: float | None = 10.0
@@ -40,8 +40,8 @@ class PaperConfig:
             raise ValueError("Capital, position size and leverage must be positive")
         if not 0 <= self.sell_threshold < self.buy_threshold <= 1:
             raise ValueError("Require 0 <= sell threshold < buy threshold <= 1")
-        if self.persistence < 1 or self.max_daily_trades < 1:
-            raise ValueError("Persistence and max daily trades must be at least one")
+        if self.persistence < 1 or (self.max_daily_trades is not None and self.max_daily_trades < 1):
+            raise ValueError("Persistence and max daily trades must be at least one when enabled")
         if not 0 < self.risk_per_trade_pct <= 100:
             raise ValueError("Risk per trade must be in (0, 100]")
         if min(self.commission_per_unit_per_side, self.slippage_price_per_side, self.max_allowed_spread, self.max_daily_loss) < 0:
@@ -127,6 +127,16 @@ class PaperAccount:
             self.state["config"] = asdict(updated)
             self.state["config_fingerprint"] = updated.fingerprint
             self.state["last_reason"] = f"entry mode changed to {mode}"
+            self._save()
+
+    def update_config_preserving_history(self, config: PaperConfig) -> None:
+        """Apply risk/execution settings without closing positions or erasing the ledger."""
+        config.validate()
+        with self._lock:
+            self.config = config
+            self.state["config"] = asdict(config)
+            self.state["config_fingerprint"] = config.fingerprint
+            self.state["last_reason"] = "configurazione aggiornata; storico e posizioni preservati"
             self._save()
 
     def _save(self) -> None:
@@ -349,7 +359,8 @@ class PaperAccount:
                 blockers = []
                 max_positions, confirmations, minimum_entry_gap = self.config.entry_rules
                 if tick.spread > self.config.max_allowed_spread: blockers.append("spread exceeds maximum")
-                if count >= self.config.max_daily_trades: blockers.append("daily trade limit")
+                if self.config.max_daily_trades is not None and count >= self.config.max_daily_trades:
+                    blockers.append("daily trade limit")
                 if self.config.max_daily_loss > 0 and daily_pnl <= -self.config.max_daily_loss: blockers.append("daily loss limit")
                 if len(positions) >= max_positions: blockers.append(f"position limit {len(positions)}/{max_positions}")
                 candidate_side = "LONG" if candidate == "BUY" else "SHORT"
@@ -489,6 +500,17 @@ class PaperRuntime:
             self.config = updated
             for account in self.accounts.values():
                 account.set_entry_mode(mode)
+
+    def update_config_preserving_history(self, config: PaperConfig) -> None:
+        """Update every paper account in place, preserving open legs and ledger."""
+        config.validate()
+        with self._lock:
+            self.config = config
+            for account in self.accounts.values():
+                account.update_config_preserving_history(config)
+            for engine in self.engines.values():
+                if isinstance(engine, LiveInferenceEngine):
+                    engine.buy_threshold, engine.sell_threshold = config.buy_threshold, config.sell_threshold
 
     def reconfigure_and_reset(self, config: PaperConfig) -> None:
         """Apply one fair configuration to every model and start fresh experiments."""
