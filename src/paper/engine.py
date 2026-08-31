@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.live.inference import LiveInference, LiveInferenceEngine
+from src.live.inference import CostAwareLiveInferenceEngine, LiveInference, LiveInferenceEngine
 from src.live.mt5_client import MarketTick
 
 
@@ -408,10 +408,10 @@ class PaperRuntime:
     def __init__(self, root: Path | str, config: PaperConfig):
         self.root, self.config = Path(root), config
         manifest = self.root / "models/baseline_manifest_provisional.json"
-        definitions: list[tuple[str, Path, Path, str]] = [
-            ("LightGBM", self.root / "models/lightgbm_up_5m_sigmoid_provisional.joblib", manifest, "lightgbm"),
-            ("Logistic Regression", self.root / "models/logistic_regression_up_5m_sigmoid_provisional.joblib", manifest, "logistic_regression"),
-            ("XGBoost", self.root / "models/xgboost_up_5m_sigmoid_provisional.joblib", manifest, "xgboost"),
+        definitions: list[tuple[str, Path, Path, str, str]] = [
+            ("LightGBM", self.root / "models/lightgbm_up_5m_sigmoid_provisional.joblib", manifest, "lightgbm", "binary"),
+            ("Logistic Regression", self.root / "models/logistic_regression_up_5m_sigmoid_provisional.joblib", manifest, "logistic_regression", "binary"),
+            ("XGBoost", self.root / "models/xgboost_up_5m_sigmoid_provisional.joblib", manifest, "xgboost", "binary"),
         ]
         selection_path = self.root / "data/live/paper/model_selection.json"
         if selection_path.exists():
@@ -422,15 +422,18 @@ class PaperRuntime:
                     model_path, manifest_path = Path(item["artifact"]), Path(item["manifest"])
                     if model_path.exists() and manifest_path.exists():
                         account_key = hashlib.sha256(str(model_path.resolve()).encode()).hexdigest()[:12]
-                        custom.append((str(item["label"]), model_path, manifest_path, account_key))
+                    custom.append((str(item["label"]), model_path, manifest_path, account_key, str(item.get("kind", "binary"))))
                 if custom:
                     definitions = custom
             except (OSError, KeyError, TypeError, json.JSONDecodeError):
                 pass
         self.engines, self.accounts = {}, {}
-        for label, path, model_manifest, key in definitions:
+        for label, path, model_manifest, key, kind in definitions:
             if path.exists():
-                self.engines[label] = LiveInferenceEngine(path, model_manifest, config.buy_threshold, config.sell_threshold)
+                engine = CostAwareLiveInferenceEngine(path, model_manifest) if kind == "cost_aware" else LiveInferenceEngine(
+                    path, model_manifest, config.buy_threshold, config.sell_threshold,
+                )
+                self.engines[label] = engine
                 self.accounts[label] = PaperAccount(key, label, config, self.root / "data/live/paper")
         self._last_bar: int | None = None
         self._inferences: dict[str, LiveInference] = {}

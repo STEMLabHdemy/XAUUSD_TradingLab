@@ -447,6 +447,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     with st.container(border=True):
         st.subheader("Inference realtime", help="Si aggiorna una volta per ogni candela M1 completata.")
         if show_paper_controls:
+            is_cost_aware = bool(displayed_inference.model and "cost-aware" in displayed_inference.model.lower())
             with st.container(horizontal=True):
                 st.metric("Modello selezionato", selected_model, border=True)
                 st.metric(
@@ -454,18 +455,21 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     f"{displayed_inference.horizon_minutes} minuti" if displayed_inference.horizon_minutes else "N/D",
                     border=True,
                 )
-                st.metric(
-                    f"P_up {displayed_inference.horizon_minutes or '?'}m",
-                    f"{displayed_inference.probability_up:.1%}" if displayed_inference.probability_up is not None else "N/D",
-                    border=True,
-                )
+                if is_cost_aware:
+                    st.metric("Classe cost-aware", displayed_inference.candidate, border=True)
+                else:
+                    st.metric(
+                        f"P_up {displayed_inference.horizon_minutes or '?'}m",
+                        f"{displayed_inference.probability_up:.1%}" if displayed_inference.probability_up is not None else "N/D",
+                        border=True,
+                    )
                 st.metric("Segnale paper", selected_state["last_signal"], border=True)
             st.caption(
                 "La previsione viene aggiornata a ogni candela M1 completa; l'orizzonte indica quanto avanti "
                 "nel tempo il modello cerca di prevedere, non ogni quanto viene eseguito."
             )
             probability = displayed_inference.probability_up
-            if probability is not None and selected_state["last_signal"] == "NO_TRADE":
+            if probability is not None and not is_cost_aware and selected_state["last_signal"] == "NO_TRADE":
                 buy_gap = max(0.0, selected_account.config.buy_threshold - float(probability))
                 sell_gap = max(0.0, float(probability) - selected_account.config.sell_threshold)
                 st.caption(
