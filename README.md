@@ -33,6 +33,9 @@ BUY/SELL/EXIT markers and CSV trade export are available in Live Paper. The
 current models remain provisional single-horizon 5-minute models, so their paper
 results are evidence to collect, not a production trading recommendation.
 
+For the current research-only cost-aware H15 paper model, see the
+[logical flowchart](docs/COST_AWARE_PAPER_FLOW.md).
+
 ## Setup
 
 ```powershell
