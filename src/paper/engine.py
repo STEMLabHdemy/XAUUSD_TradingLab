@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+import math
 from pathlib import Path
 from threading import RLock
 from typing import Any
-import math
 
 import pandas as pd
 
@@ -33,6 +33,7 @@ class PaperConfig:
     persistence: int = 2
     cooldown_minutes: int = 3
     probability_exit_threshold: float = .50
+    entry_mode: str = "controlled"
 
     def validate(self) -> None:
         if self.starting_capital <= 0 or self.position_size_units <= 0 or self.leverage <= 0:
@@ -45,6 +46,23 @@ class PaperConfig:
             raise ValueError("Risk per trade must be in (0, 100]")
         if min(self.commission_per_unit_per_side, self.slippage_price_per_side, self.max_allowed_spread, self.max_daily_loss) < 0:
             raise ValueError("Costs and limits cannot be negative")
+        if self.entry_mode not in {"controlled", "intermediate", "burst"}:
+            raise ValueError("Entry mode must be controlled, intermediate or burst")
+
+    @property
+    def entry_rules(self) -> tuple[int, int, int]:
+        """Return max open legs, confirmations and minimum minutes between entries."""
+        if self.entry_mode == "intermediate":
+            return 3, self.persistence, 3
+        if self.entry_mode == "burst":
+            return 10, 1, 0
+        return 1, self.persistence, self.cooldown_minutes
+
+    @property
+    def exit_cooldown_minutes(self) -> int:
+        if self.entry_mode == "burst":
+            return 0
+        return self.cooldown_minutes
 
     @property
     def fingerprint(self) -> str:
@@ -52,7 +70,7 @@ class PaperConfig:
 
 
 class PaperAccount:
-    """Persistent, one-position virtual account. It has no broker-order interface."""
+    """Persistent virtual account with no broker-order interface."""
 
     def __init__(self, account_id: str, model: str, config: PaperConfig, directory: Path | str):
         config.validate()
@@ -70,8 +88,9 @@ class PaperAccount:
             "equity": self.config.starting_capital, "unrealized_pnl": 0.0,
             "used_margin": 0.0, "free_margin": self.config.starting_capital,
             "exposure": 0.0, "peak_equity": self.config.starting_capital, "max_drawdown": 0.0,
-            "position": None, "trades": [], "events": [], "equity_history": [],
+            "position": None, "positions": [], "trades": [], "events": [], "equity_history": [],
             "pending_direction": None, "persistence_count": 0, "last_exit_time": None,
+            "last_entry_time": None,
             "last_processed_bar": None, "last_signal": "NO_TRADE", "last_reason": "paper stopped",
             "next_trade_id": 1,
         }
@@ -80,12 +99,38 @@ class PaperAccount:
         if not self.path.exists():
             return self._new_state()
         state = json.loads(self.path.read_text(encoding="utf-8"))
+        if "positions" not in state:
+            state["positions"] = [state["position"]] if state.get("position") else []
+        state.setdefault("last_entry_time", None)
+        self._sync_position_alias(state)
         if state.get("config_fingerprint") != self.config.fingerprint:
             # Existing experiments keep their original immutable configuration.
             self.config = PaperConfig(**state["config"])
         return state
 
+    @staticmethod
+    def _sync_position_alias(state: dict[str, Any]) -> None:
+        """Keep the legacy singular field readable while positions is canonical."""
+        positions = state.get("positions", [])
+        state["position"] = positions[0] if positions else None
+
+    def _positions(self) -> list[dict[str, Any]]:
+        positions = self.state.setdefault("positions", [])
+        self._sync_position_alias(self.state)
+        return positions
+
+    def set_entry_mode(self, mode: str) -> None:
+        with self._lock:
+            updated = replace(self.config, entry_mode=mode)
+            updated.validate()
+            self.config = updated
+            self.state["config"] = asdict(updated)
+            self.state["config_fingerprint"] = updated.fingerprint
+            self.state["last_reason"] = f"entry mode changed to {mode}"
+            self._save()
+
     def _save(self) -> None:
+        self._sync_position_alias(self.state)
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -113,10 +158,15 @@ class PaperAccount:
         tick: MarketTick,
         stop_loss: float | None,
         take_profit: float | None,
+        trade_id: int | None = None,
     ) -> None:
         """Update virtual SL/TP after validating them against the executable price."""
         with self._lock:
-            position = self.state["position"]
+            positions = self._positions()
+            position = next(
+                (row for row in positions if trade_id is None or int(row["trade_id"]) == int(trade_id)),
+                None,
+            )
             if not position:
                 raise ValueError("Non c'è una posizione aperta da modificare")
             for label, value in (("Stop loss", stop_loss), ("Take profit", take_profit)):
@@ -148,12 +198,17 @@ class PaperAccount:
             self._mark(tick, save=False)
             self._save()
 
-    def close_manually(self, tick: MarketTick) -> None:
+    def close_manually(self, tick: MarketTick, trade_id: int | None = None) -> None:
         """Close the current virtual position at the executable market side."""
         with self._lock:
-            if not self.state["position"]:
+            positions = self._positions()
+            position = next(
+                (row for row in positions if trade_id is None or int(row["trade_id"]) == int(trade_id)),
+                None,
+            )
+            if not position:
                 raise ValueError("Non c'è una posizione aperta da chiudere")
-            self._close(tick, "manual_close")
+            self._close_position(position, tick, "manual_close")
             self.state["last_signal"] = "EXIT"
             self.state["last_reason"] = "chiusura manuale"
             self._mark(tick, save=False)
@@ -166,17 +221,17 @@ class PaperAccount:
         return len(entries), sum(float(row["net_pnl"]) for row in trades)
 
     def _mark(self, tick: MarketTick, save: bool = True) -> None:
-        position = self.state["position"]
         unrealized = used = exposure = 0.0
-        if position:
+        for position in self._positions():
             quantity = float(position["quantity"])
             raw_exit = tick.bid if position["side"] == "LONG" else tick.ask
             direction = 1 if position["side"] == "LONG" else -1
             gross = direction * (raw_exit - float(position["raw_entry_price"])) * quantity
             future_cost = self.config.slippage_price_per_side * quantity + self.config.commission_per_unit_per_side * quantity
-            unrealized = gross - float(position["entry_costs"]) - future_cost
-            exposure = raw_exit * quantity
-            used = exposure / self.config.leverage
+            unrealized += gross - float(position["entry_costs"]) - future_cost
+            leg_exposure = raw_exit * quantity
+            exposure += leg_exposure
+            used += leg_exposure / self.config.leverage
         equity = float(self.state["balance"]) + unrealized
         self.state.update(unrealized_pnl=unrealized, equity=equity, used_margin=used,
                           free_margin=equity - used, exposure=exposure)
@@ -204,13 +259,12 @@ class PaperAccount:
             "take_profit": take, "entry_costs": (slip + self.config.commission_per_unit_per_side) * quantity,
             "model": self.model, "regime": "not_available", "expected_return": None, "reason": reason,
         }
-        self.state["position"] = position
+        self._positions().append(position)
+        self.state["last_entry_time"] = position["entry_time"]
+        self._sync_position_alias(self.state)
         self.state["events"].append({**position, "event": "BUY" if side == "LONG" else "SELL", "timestamp": position["entry_time"], "price": price})
 
-    def _close(self, tick: MarketTick, reason: str) -> None:
-        position = self.state["position"]
-        if not position:
-            return
+    def _close_position(self, position: dict[str, Any], tick: MarketTick, reason: str) -> None:
         quantity, slip = float(position["quantity"]), self.config.slippage_price_per_side
         raw = tick.bid if position["side"] == "LONG" else tick.ask
         exit_price = raw - slip if position["side"] == "LONG" else raw + slip
@@ -230,10 +284,19 @@ class PaperAccount:
         }
         self.state["trades"].append(row)
         self.state["events"].append({**row, "event": "EXIT", "timestamp": row["exit_time"], "price": exit_price})
-        self.state["position"] = None
+        self.state["positions"] = [
+            row for row in self._positions() if int(row["trade_id"]) != int(position["trade_id"])
+        ]
+        self._sync_position_alias(self.state)
         self.state["last_exit_time"] = tick.datetime_utc.isoformat()
         self.state["pending_direction"] = None
         self.state["persistence_count"] = 0
+
+    def _close_all(self, tick: MarketTick, reason: str) -> int:
+        positions = list(self._positions())
+        for position in positions:
+            self._close_position(position, tick, reason)
+        return len(positions)
 
     def process(self, tick: MarketTick, inference: LiveInference) -> None:
         with self._lock:
@@ -241,70 +304,89 @@ class PaperAccount:
             if not self.state["running"]:
                 self._save()
                 return
-            position = self.state["position"]
-            protective_exit = False
-            if position:
+            protective_exits = 0
+            for position in list(self._positions()):
                 if position["side"] == "LONG" and position["stop_loss"] is not None and tick.bid <= position["stop_loss"]:
-                    self._close(tick, "stop_loss")
-                    protective_exit = True
+                    self._close_position(position, tick, "stop_loss")
+                    protective_exits += 1
                 elif position["side"] == "LONG" and position["take_profit"] is not None and tick.bid >= position["take_profit"]:
-                    self._close(tick, "take_profit")
-                    protective_exit = True
+                    self._close_position(position, tick, "take_profit")
+                    protective_exits += 1
                 elif position["side"] == "SHORT" and position["stop_loss"] is not None and tick.ask >= position["stop_loss"]:
-                    self._close(tick, "stop_loss")
-                    protective_exit = True
+                    self._close_position(position, tick, "stop_loss")
+                    protective_exits += 1
                 elif position["side"] == "SHORT" and position["take_profit"] is not None and tick.ask <= position["take_profit"]:
-                    self._close(tick, "take_profit")
-                    protective_exit = True
+                    self._close_position(position, tick, "take_profit")
+                    protective_exits += 1
 
             bar_time = inference.inference_time_utc
             if not inference.available or bar_time is None or self.state["last_processed_bar"] == bar_time.isoformat():
                 self._mark(tick)
                 return
             self.state["last_processed_bar"] = bar_time.isoformat()
-            if protective_exit:
-                self.state["last_signal"], self.state["last_reason"] = "EXIT", "protective exit"
+            if protective_exits:
+                self.state["last_signal"] = "EXIT"
+                self.state["last_reason"] = f"{protective_exits} protective exit(s)"
                 self._mark(tick)
                 return
             score = float(inference.probability_up)
-            position = self.state["position"]
             signal, reason = "NO_TRADE", "inside no-trade zone"
-            if position:
-                exit_long = position["side"] == "LONG" and score < self.config.probability_exit_threshold
-                exit_short = position["side"] == "SHORT" and score > self.config.probability_exit_threshold
+            positions = self._positions()
+            if positions:
+                side = str(positions[0]["side"])
+                exit_long = side == "LONG" and score < self.config.probability_exit_threshold
+                exit_short = side == "SHORT" and score > self.config.probability_exit_threshold
                 if exit_long or exit_short:
                     signal, reason = "EXIT", "probability reversal"
-                    self._close(tick, reason)
-                else:
-                    signal, reason = "HOLD", "open position remains supported"
-            else:
-                candidate = "BUY" if score >= self.config.buy_threshold else "SELL" if score <= self.config.sell_threshold else None
+                    closed = self._close_all(tick, reason)
+                    self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
+                    self._mark(tick)
+                    return
+
+            candidate = "BUY" if score >= self.config.buy_threshold else "SELL" if score <= self.config.sell_threshold else None
+            if candidate:
                 count, daily_pnl = self._today_stats(tick.datetime_utc)
                 blockers = []
+                max_positions, confirmations, minimum_entry_gap = self.config.entry_rules
                 if tick.spread > self.config.max_allowed_spread: blockers.append("spread exceeds maximum")
                 if count >= self.config.max_daily_trades: blockers.append("daily trade limit")
                 if self.config.max_daily_loss > 0 and daily_pnl <= -self.config.max_daily_loss: blockers.append("daily loss limit")
+                if len(positions) >= max_positions: blockers.append(f"position limit {len(positions)}/{max_positions}")
+                candidate_side = "LONG" if candidate == "BUY" else "SHORT"
+                if positions and any(position["side"] != candidate_side for position in positions):
+                    blockers.append("opposite position already open")
                 risk_amount = float(self.state["equity"]) * self.config.risk_per_trade_pct / 100
                 if self.config.stop_loss_price and self.config.stop_loss_price * self.config.position_size_units > risk_amount:
                     blockers.append("risk per trade limit")
                 required_margin = tick.ask * self.config.position_size_units / self.config.leverage
                 if required_margin > float(self.state["free_margin"]): blockers.append("insufficient virtual margin")
                 last_exit = pd.Timestamp(self.state["last_exit_time"]) if self.state["last_exit_time"] else None
-                if last_exit is not None and tick.datetime_utc < last_exit + pd.Timedelta(minutes=self.config.cooldown_minutes): blockers.append("cooldown active")
-                if candidate and not blockers:
+                if not positions and last_exit is not None and tick.datetime_utc < last_exit + pd.Timedelta(minutes=self.config.exit_cooldown_minutes):
+                    blockers.append("cooldown active")
+                last_entry = pd.Timestamp(self.state["last_entry_time"]) if self.state.get("last_entry_time") else None
+                if last_entry is not None and tick.datetime_utc < last_entry + pd.Timedelta(minutes=minimum_entry_gap):
+                    blockers.append("minimum interval between entries")
+                if not blockers:
                     if self.state["pending_direction"] == candidate:
                         self.state["persistence_count"] += 1
                     else:
                         self.state["pending_direction"], self.state["persistence_count"] = candidate, 1
-                    if self.state["persistence_count"] >= self.config.persistence:
-                        signal, reason = candidate, f"threshold and {self.config.persistence} confirmations passed"
-                        self._open("LONG" if candidate == "BUY" else "SHORT", tick, inference, reason)
+                    if self.state["persistence_count"] >= confirmations:
+                        signal = candidate
+                        reason = f"{self.config.entry_mode}: threshold and {confirmations} confirmation(s) passed"
+                        self._open(candidate_side, tick, inference, reason)
                         self.state["pending_direction"], self.state["persistence_count"] = None, 0
                     else:
-                        reason = f"confirmation {self.state['persistence_count']}/{self.config.persistence}"
+                        reason = f"confirmation {self.state['persistence_count']}/{confirmations}"
                 else:
                     self.state["pending_direction"], self.state["persistence_count"] = None, 0
-                    if blockers: reason = "; ".join(blockers)
+                    reason = "; ".join(blockers)
+                    if positions:
+                        signal = "HOLD"
+            elif positions:
+                signal, reason = "HOLD", f"{len(positions)} open position(s) remain supported"
+            else:
+                self.state["pending_direction"], self.state["persistence_count"] = None, 0
             self.state["last_signal"], self.state["last_reason"] = signal, reason
             self._mark(tick, save=False)
             self.state["equity_history"].append({"timestamp": tick.datetime_utc.isoformat(), "equity": self.state["equity"], "balance": self.state["balance"]})
@@ -369,6 +451,7 @@ class PaperRuntime:
         rows = []
         for name, account in self.accounts.items():
             state = account.snapshot()
+            positions = state.get("positions") or ([state["position"]] if state.get("position") else [])
             total_pnl = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
             rows.append({
                 "model": name,
@@ -381,7 +464,10 @@ class PaperRuntime:
                 "return_pct": total_pnl / account.config.starting_capital,
                 "free_margin": state["free_margin"],
                 "trades": len(state["trades"]),
-                "position": state["position"]["side"] if state["position"] else "FLAT",
+                "entry_mode": account.config.entry_mode,
+                "open_positions": len(positions),
+                "position_limit": account.config.entry_rules[0],
+                "position": f"{len(positions)} {positions[0]['side']}" if positions else "FLAT",
                 "signal": state["last_signal"],
                 "max_drawdown": state["max_drawdown"],
             })
@@ -391,6 +477,15 @@ class PaperRuntime:
         """Return the latest inference produced by a selected paper model."""
         with self._lock:
             return self._inferences.get(model)
+
+    def set_entry_mode(self, mode: str) -> None:
+        """Apply one entry-intensity preset to all accounts without resetting them."""
+        with self._lock:
+            updated = replace(self.config, entry_mode=mode)
+            updated.validate()
+            self.config = updated
+            for account in self.accounts.values():
+                account.set_entry_mode(mode)
 
     def reconfigure_and_reset(self, config: PaperConfig) -> None:
         """Apply one fair configuration to every model and start fresh experiments."""

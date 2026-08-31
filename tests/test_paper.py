@@ -130,7 +130,68 @@ class PaperAccountTests(unittest.TestCase):
 
             self.assertAlmostEqual(row.total_pnl, row.realized_pnl + row.unrealized_pnl)
             self.assertAlmostEqual(row.return_pct, row.total_pnl / account.config.starting_capital)
-            self.assertEqual(row.position, "LONG")
+            self.assertEqual(row.position, "1 LONG")
+
+    def test_controlled_mode_keeps_one_open_position(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="controlled")
+            account.start()
+            for minute in range(5):
+                account.process(tick(minute, 100, 101), inference(minute, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 1)
+
+    def test_intermediate_mode_opens_three_legs_with_three_minute_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="intermediate")
+            account.start()
+            for minute in range(7):
+                account.process(tick(minute, 100, 101), inference(minute, .9))
+            state = account.snapshot()
+            self.assertEqual(len(state["positions"]), 3)
+            self.assertEqual([row["trade_id"] for row in state["positions"]], [1, 2, 3])
+
+    def test_burst_mode_opens_one_leg_per_completed_bar_and_closes_all_on_reversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="burst")
+            account.start()
+            for minute in range(12):
+                account.process(tick(minute, 100, 101), inference(minute, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 10)
+            account.process(tick(12, 100, 101), inference(12, .1))
+            state = account.snapshot()
+            self.assertEqual(state["positions"], [])
+            self.assertEqual(len(state["trades"]), 10)
+            self.assertTrue(all(row["exit_reason"] == "probability reversal" for row in state["trades"]))
+            account.process(tick(13, 100, 101), inference(13, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 1)
+
+    def test_manual_actions_target_one_leg(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="burst")
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(1, 100, 101), inference(1, .9))
+            account.update_protection(tick(2, 100, 101), 94, 112, trade_id=2)
+            positions = account.snapshot()["positions"]
+            self.assertEqual(positions[0]["stop_loss"], 96.1)
+            self.assertEqual(positions[1]["stop_loss"], 94)
+            account.close_manually(tick(2, 100, 101), trade_id=2)
+            self.assertEqual([row["trade_id"] for row in account.snapshot()["positions"]], [1])
+
+    def test_mode_change_preserves_open_legs_and_aggregates_margin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, entry_mode="burst", leverage=10)
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(1, 100, 101), inference(1, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 2)
+            self.assertAlmostEqual(account.snapshot()["used_margin"], 40.0)
+            account.set_entry_mode("controlled")
+            state = account.snapshot()
+            self.assertEqual(len(state["positions"]), 2)
+            self.assertEqual(account.config.entry_mode, "controlled")
+            account.process(tick(2, 100, 101), inference(2, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 2)
 
     def test_runtime_exposes_selected_model_inference(self) -> None:
         runtime = PaperRuntime.__new__(PaperRuntime)

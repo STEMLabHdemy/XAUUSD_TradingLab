@@ -30,6 +30,25 @@ def _pnl_color(value: float) -> str:
     return "color: #94A3B8"
 
 
+def _state_positions(state: dict[str, object]) -> list[dict[str, object]]:
+    """Read new multi-position state and legacy singular state uniformly."""
+    positions = state.get("positions")
+    if isinstance(positions, list):
+        return positions
+    position = state.get("position")
+    return [position] if isinstance(position, dict) else []
+
+
+def _position_pnl(account: object, position: dict[str, object], tick: object) -> float:
+    side = str(position["side"])
+    mark = float(tick.bid if side == "LONG" else tick.ask)
+    quantity = float(position["quantity"])
+    direction = 1 if side == "LONG" else -1
+    gross = direction * (mark - float(position["raw_entry_price"])) * quantity
+    future_cost = account.config.slippage_price_per_side * quantity + account.config.commission_per_unit_per_side * quantity
+    return gross - float(position["entry_costs"]) - future_cost
+
+
 def _open_positions_frame(
     runtime: PaperRuntime,
     tick: object,
@@ -40,46 +59,31 @@ def _open_positions_frame(
     now = pd.Timestamp(tick.datetime_utc)
     for model, account in runtime.accounts.items():
         state = account.snapshot()
-        position = state["position"]
-        if not position:
-            continue
-        side = str(position["side"])
-        entry_time = pd.Timestamp(position["entry_time"])
-        if entry_time.tzinfo is None:
-            entry_time = entry_time.tz_localize("UTC")
-        else:
-            entry_time = entry_time.tz_convert("UTC")
-        held_minutes = max(0, int((now - entry_time).total_seconds() // 60))
-        mark_price = float(tick.bid if side == "LONG" else tick.ask)
-        stop_loss = position.get("stop_loss")
-        take_profit = position.get("take_profit")
-        stop_distance = (
-            mark_price - float(stop_loss) if side == "LONG" else float(stop_loss) - mark_price
-        ) if stop_loss is not None else None
-        take_distance = (
-            float(take_profit) - mark_price if side == "LONG" else mark_price - float(take_profit)
-        ) if take_profit is not None else None
-        quantity = float(position["quantity"])
-        notional = mark_price * quantity
-        margin = notional / float(account.config.leverage)
-        risk_to_stop = max(0.0, float(stop_distance) * quantity) if stop_distance is not None else None
-        rows.append({
-            "Modello": model,
-            "Direzione": f"▲ {side}" if side == "LONG" else f"▼ {side}",
-            "Aperta alle": entry_time.tz_convert(display_timezone).strftime("%d/%m %H:%M:%S"),
-            "Durata": f"{held_minutes // 60}h {held_minutes % 60:02d}m" if held_minutes >= 60 else f"{held_minutes} min",
-            "Quantità": quantity,
-            "Nozionale": notional,
-            "Margine": margin,
-            "Rischio a SL": risk_to_stop,
-            "Ingresso": float(position["entry_price"]),
-            "Prezzo ora": mark_price,
-            "PnL aperto": float(state["unrealized_pnl"]),
-            "SL": float(stop_loss) if stop_loss is not None else None,
-            "Distanza SL": stop_distance,
-            "TP": float(take_profit) if take_profit is not None else None,
-            "Distanza TP": take_distance,
-        })
+        for position in _state_positions(state):
+            side = str(position["side"])
+            entry_time = pd.Timestamp(position["entry_time"])
+            entry_time = entry_time.tz_localize("UTC") if entry_time.tzinfo is None else entry_time.tz_convert("UTC")
+            held_minutes = max(0, int((now - entry_time).total_seconds() // 60))
+            mark_price = float(tick.bid if side == "LONG" else tick.ask)
+            stop_loss, take_profit = position.get("stop_loss"), position.get("take_profit")
+            stop_distance = (mark_price - float(stop_loss) if side == "LONG" else float(stop_loss) - mark_price) if stop_loss is not None else None
+            take_distance = (float(take_profit) - mark_price if side == "LONG" else mark_price - float(take_profit)) if take_profit is not None else None
+            quantity = float(position["quantity"])
+            leg_pnl = _position_pnl(account, position, tick)
+            notional = mark_price * quantity
+            rows.append({
+                "Modello": model, "Trade": int(position["trade_id"]),
+                "Direzione": f"▲ {side}" if side == "LONG" else f"▼ {side}",
+                "Aperta alle": entry_time.tz_convert(display_timezone).strftime("%d/%m %H:%M:%S"),
+                "Durata": f"{held_minutes // 60}h {held_minutes % 60:02d}m" if held_minutes >= 60 else f"{held_minutes} min",
+                "Quantità": quantity, "Nozionale": notional,
+                "Margine": notional / float(account.config.leverage),
+                "Rischio a SL": max(0.0, float(stop_distance) * quantity) if stop_distance is not None else None,
+                "Ingresso": float(position["entry_price"]), "Prezzo ora": mark_price,
+                "PnL aperto": leg_pnl, "SL": float(stop_loss) if stop_loss is not None else None,
+                "Distanza SL": stop_distance, "TP": float(take_profit) if take_profit is not None else None,
+                "Distanza TP": take_distance,
+            })
     return pd.DataFrame(rows)
 
 
@@ -94,7 +98,7 @@ def _portfolio_totals(runtime: PaperRuntime) -> dict[str, float | int]:
         "realized_pnl": realized,
         "unrealized_pnl": unrealized,
         "total_pnl": realized + unrealized,
-        "open_positions": sum(state["position"] is not None for _, state in states),
+        "open_positions": sum(len(_state_positions(state)) for _, state in states),
         "exposure": sum(float(state["exposure"]) for _, state in states),
         "used_margin": sum(float(state["used_margin"]) for _, state in states),
     }
@@ -105,8 +109,7 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
     rows: list[dict[str, object]] = []
     for model, account in runtime.accounts.items():
         state = account.snapshot()
-        position = state.get("position")
-        if position:
+        for position in _state_positions(state):
             side = str(position["side"])
             mark = float(tick.bid if side == "LONG" else tick.ask)
             quantity = float(position["quantity"])
@@ -117,7 +120,7 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
                 "Quantità": quantity, "Nozionale": mark * quantity,
                 "Margine": mark * quantity / account.config.leverage,
                 "SL": position.get("stop_loss"), "TP": position.get("take_profit"),
-                "PnL": float(state["unrealized_pnl"]), "Costi": None, "Motivo uscita": "—",
+                "PnL": _position_pnl(account, position, tick), "Costi": None, "Motivo uscita": "—",
             })
         for trade in state.get("trades", []):
             quantity = float(trade["quantity"])
@@ -143,7 +146,7 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
 def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_timezone: str) -> None:
     with st.container(border=True):
         st.subheader("Portafoglio paper in tempo reale")
-        st.caption("Somma dei tre modelli sullo stesso feed MT5. Capitale virtuale; nessun ordine viene inviato al broker.")
+        st.caption("Somma dei modelli attivi sullo stesso feed MT5. Capitale virtuale; nessun ordine viene inviato al broker.")
         totals = _portfolio_totals(runtime)
         total_return = totals["total_pnl"] / totals["starting_capital"] if totals["starting_capital"] else 0.0
         with st.container(horizontal=True):
@@ -155,7 +158,8 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
             )
             st.metric("PnL realizzato", f"{totals['realized_pnl']:+,.2f} USD", border=True)
             st.metric("PnL posizioni aperte", f"{totals['unrealized_pnl']:+,.2f} USD", border=True)
-            st.metric("Posizioni aperte", f"{totals['open_positions']} / {len(runtime.accounts)}", border=True)
+            total_slots = sum(account.config.entry_rules[0] for account in runtime.accounts.values())
+            st.metric("Posizioni aperte", f"{totals['open_positions']} / {total_slots}", border=True)
             st.metric("Esposizione", f"{totals['exposure']:,.2f} USD", border=True)
             st.metric("Margine usato", f"{totals['used_margin']:,.2f} USD", border=True)
 
@@ -336,7 +340,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=2)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=3)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:
@@ -375,6 +379,42 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         selected_model = next(iter(runtime.accounts))
         if show_paper_controls:
             selected_model = st.selectbox("Paper account / modello", list(runtime.accounts), key="paper_selected_model")
+            mode_labels = {
+                "Controllata · 1 posizione": "controlled",
+                "Intermedia · fino a 3": "intermediate",
+                "Raffica · fino a 10": "burst",
+            }
+            selected_cfg = runtime.accounts[selected_model].config
+            current_mode_label = next(label for label, value in mode_labels.items() if value == selected_cfg.entry_mode)
+            with st.container(border=True):
+                st.markdown("**Intensità degli ingressi**")
+                with st.form("paper_entry_mode", border=False):
+                    mode_label = st.segmented_control(
+                        "Modalità", list(mode_labels), default=current_mode_label,
+                        required=True, key="paper_entry_mode_choice",
+                    )
+                    with st.container(horizontal=True):
+                        apply_selected_mode = st.form_submit_button(
+                            "Applica al modello selezionato", icon=":material/check:"
+                        )
+                        apply_all_modes = st.form_submit_button(
+                            "Applica a tutti i modelli", icon=":material/tune:"
+                        )
+                descriptions = {
+                    "controlled": "1 posizione per modello; conferme e cooldown configurati.",
+                    "intermediate": "Fino a 3 posizioni concordi; almeno 3 minuti tra gli ingressi.",
+                    "burst": "Fino a 10 posizioni concordi; al massimo un nuovo ingresso per candela M1.",
+                }
+                st.caption(
+                    descriptions[selected_cfg.entry_mode]
+                    + " Restano attivi tutti i limiti di rischio; cambiare modalità non chiude posizioni già aperte."
+                )
+                if apply_selected_mode:
+                    runtime.accounts[selected_model].set_entry_mode(mode_labels[str(mode_label)])
+                    st.rerun(scope="fragment")
+                if apply_all_modes:
+                    runtime.set_entry_mode(mode_labels[str(mode_label)])
+                    st.rerun(scope="fragment")
             _render_portfolio_overview(runtime, tick, service.display_timezone)
     selected_account = runtime.accounts[selected_model]
     selected_state = selected_account.snapshot()
@@ -464,21 +504,36 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 st.metric("Margine libero", f"{selected_state['free_margin']:,.2f}", border=True)
                 st.metric("Max drawdown", f"{selected_state['max_drawdown']:.2%}", border=True)
                 st.metric("Trade chiusi", f"{len(selected_state['trades'])}", border=True)
-            position = selected_state["position"]
+            selected_positions = _state_positions(selected_state)
+            position_summary = (
+                f"{len(selected_positions)} {selected_positions[0]['side']}"
+                if selected_positions else "FLAT"
+            )
             st.info(
-                f"{'RUNNING' if selected_state['running'] else 'STOPPED'} · Posizione: "
-                f"{position['side'] if position else 'FLAT'} · {selected_state['last_reason']}",
+                f"{'RUNNING' if selected_state['running'] else 'STOPPED'} · Posizioni: "
+                f"{position_summary} · modalità {selected_account.config.entry_mode} · {selected_state['last_reason']}",
                 icon=":material/play_circle:" if selected_state["running"] else ":material/pause_circle:",
             )
 
-            open_models = [name for name, account in runtime.accounts.items() if account.snapshot()["position"]]
-            with st.expander("Gestisci una posizione aperta", icon=":material/edit:", expanded=bool(open_models)):
-                if not open_models:
+            open_choices: dict[str, tuple[str, dict[str, object]]] = {}
+            for model_name, account in runtime.accounts.items():
+                for open_position in _state_positions(account.snapshot()):
+                    key = f"{model_name}|{open_position['trade_id']}"
+                    open_choices[key] = (model_name, open_position)
+            with st.expander("Gestisci una posizione aperta", icon=":material/edit:", expanded=bool(open_choices)):
+                if not open_choices:
                     st.caption("Nessuna posizione aperta da modificare.")
                 else:
-                    managed_model = st.selectbox("Posizione", open_models, key="managed_paper_position")
+                    managed_key = st.selectbox(
+                        "Posizione", list(open_choices), key="managed_paper_position",
+                        format_func=lambda value: (
+                            f"{open_choices[value][0]} · trade #{open_choices[value][1]['trade_id']} · "
+                            f"{open_choices[value][1]['side']} · ingresso {float(open_choices[value][1]['entry_price']):.2f}"
+                        ),
+                    )
+                    managed_model, managed_position = open_choices[managed_key]
                     managed_account = runtime.accounts[managed_model]
-                    managed_position = managed_account.snapshot()["position"]
+                    managed_trade_id = int(managed_position["trade_id"])
                     side = managed_position["side"]
                     executable = float(tick.bid if side == "LONG" else tick.ask)
                     quantity = float(managed_position["quantity"])
@@ -487,7 +542,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                         f"nozionale {executable * quantity:,.2f} USD · "
                         f"margine {executable * quantity / managed_account.config.leverage:,.2f} USD"
                     )
-                    with st.form(f"protection_{managed_account.account_id}", border=False):
+                    with st.form(f"protection_{managed_account.account_id}_{managed_trade_id}", border=False):
                         with st.container(horizontal=True):
                             use_sl = st.checkbox("Stop loss attivo", value=managed_position.get("stop_loss") is not None)
                             new_sl = st.number_input(
@@ -502,7 +557,8 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                         if st.form_submit_button("Salva SL e TP", icon=":material/save:", type="primary"):
                             try:
                                 managed_account.update_protection(
-                                    tick, float(new_sl) if use_sl else None, float(new_tp) if use_tp else None
+                                    tick, float(new_sl) if use_sl else None,
+                                    float(new_tp) if use_tp else None, managed_trade_id,
                                 )
                                 st.success("Protezione aggiornata e registrata nello storico eventi.")
                                 st.rerun(scope="fragment")
@@ -510,13 +566,13 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                                 st.error(str(exc))
                     confirm_close = st.checkbox(
                         f"Confermo la chiusura virtuale di {managed_model}",
-                        key=f"confirm_manual_close_{managed_account.account_id}",
+                        key=f"confirm_manual_close_{managed_account.account_id}_{managed_trade_id}",
                     )
                     if st.button(
                         "Chiudi posizione a mercato", icon=":material/close:",
-                        disabled=not confirm_close, key=f"manual_close_{managed_account.account_id}",
+                        disabled=not confirm_close, key=f"manual_close_{managed_account.account_id}_{managed_trade_id}",
                     ):
-                        managed_account.close_manually(tick)
+                        managed_account.close_manually(tick, managed_trade_id)
                         st.rerun(scope="fragment")
 
             st.subheader("Confronto tra modelli", help="Stesso feed e stessa configurazione, stato e PnL indipendenti.")
@@ -524,6 +580,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 "model": "Modello", "status": "Stato", "balance": "Saldo", "equity": "Equity",
                 "realized_pnl": "PnL realizzato", "unrealized_pnl": "PnL aperto", "total_pnl": "PnL totale",
                 "return_pct": "Rendimento", "free_margin": "Margine libero", "trades": "Trade",
+                "entry_mode": "Modalità", "open_positions": "Aperte", "position_limit": "Limite",
                 "position": "Posizione", "signal": "Segnale", "max_drawdown": "Max drawdown",
             })
             styled_comparison = comparison.style.map(
@@ -569,7 +626,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     slippage = st.number_input("Slippage/lato", min_value=0.0, value=float(cfg.slippage_price_per_side), step=.01)
                     max_trades = st.number_input("Trade max/giorno", min_value=1, value=int(cfg.max_daily_trades), step=1)
                     max_loss = st.number_input("Perdita max/giorno", min_value=0.0, value=float(cfg.max_daily_loss), step=100.0)
-                apply_confirm = st.checkbox("Confermo: applica e resetta tutti e tre gli account", key="paper_config_confirm")
+                apply_confirm = st.checkbox("Confermo: applica e resetta tutti gli account", key="paper_config_confirm")
                 if st.button("Applica nuova configurazione", disabled=not apply_confirm, icon=":material/tune:"):
                     runtime.reconfigure_and_reset(PaperConfig(
                         **{**asdict(cfg), "starting_capital": capital, "position_size_units": size,

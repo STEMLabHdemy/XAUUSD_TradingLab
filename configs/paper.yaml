@@ -15,3 +15,4 @@ sell_threshold: 0.32
 persistence: 2
 cooldown_minutes: 3
 probability_exit_threshold: 0.50
+entry_mode: controlled
