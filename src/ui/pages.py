@@ -71,7 +71,29 @@ def models_page() -> None:
         if catalog.empty:
             st.info("Non ci sono artefatti binari compatibili con il paper trading.")
         else:
-            display = catalog.copy()
+            selection_path = ROOT / "data/live/paper/model_selection.json"
+            selected_artifacts: set[str] = set()
+            if selection_path.exists():
+                try:
+                    selected_artifacts = {
+                        str(item["artifact"])
+                        for item in json.loads(selection_path.read_text(encoding="utf-8")).get("models", [])
+                    }
+                except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                    selected_artifacts = set()
+
+            st.caption(
+                "Il catalogo normale mostra solo i candidati scelti per il paper. "
+                "Gli altri artefatti restano archiviati per confronto e audit, ma non affollano l'interfaccia."
+            )
+            show_experiments = st.toggle("Mostra anche artefatti sperimentali", value=False)
+            visible_catalog = catalog if show_experiments else catalog[
+                catalog["artifact"].astype(str).isin(selected_artifacts)
+            ]
+            if visible_catalog.empty:
+                visible_catalog = catalog
+                st.info("Nessun candidato curato salvato: mostro il catalogo completo.")
+            display = visible_catalog.copy()
             display.insert(0, "id", display.index.astype(str))
             st.dataframe(
                 display.drop(columns=["artifact", "manifest"]), width="stretch", hide_index=True,
@@ -82,12 +104,16 @@ def models_page() -> None:
                     "rows": st.column_config.NumberColumn("Righe", format="%d"),
                 },
             )
+            st.caption(
+                "ROC AUC 0,500 = casuale. Valori poco sopra 0,50 sono deboli: questi tre restano in paper "
+                "per confronto, non sono promossi al trading reale."
+            )
             choices = {
                 str(index): (
                     f"{row['model']} · {row['calibration']} · H{row['horizon']} · "
                     f"{row['run']} · AUC {row.get('roc_auc', float('nan')):.3f}"
                 )
-                for index, row in catalog.iterrows()
+                for index, row in visible_catalog.iterrows()
             }
             selection_path = ROOT / "data/live/paper/model_selection.json"
             selected_artifacts: set[str] = set()
@@ -100,11 +126,13 @@ def models_page() -> None:
                 except (OSError, KeyError, TypeError, json.JSONDecodeError):
                     selected_artifacts = set()
             default_ids = [
-                str(index) for index, row in catalog.iterrows()
+                str(index) for index, row in visible_catalog.iterrows()
                 if str(row["artifact"]) in selected_artifacts
             ]
             if not default_ids:
-                sigmoid = catalog[catalog["calibration"].eq("sigmoid") & catalog["run"].eq("Attivo")]
+                sigmoid = visible_catalog[
+                    visible_catalog["calibration"].eq("sigmoid") & visible_catalog["run"].eq("Attivo")
+                ]
                 default_ids = [str(index) for index in sigmoid.index[:3]]
             selected_ids = st.multiselect(
                 "Modelli da confrontare nel Live Paper (massimo 4)", list(choices),
@@ -118,7 +146,7 @@ def models_page() -> None:
                     models = []
                     used_labels: set[str] = set()
                     for selected_id in selected_ids:
-                        row = catalog.loc[int(selected_id)]
+                        row = visible_catalog.loc[int(selected_id)]
                         base_label = f"{row['model']} · H{int(row['horizon'])} · {row['calibration']}"
                         label = base_label if base_label not in used_labels else f"{base_label} · {row['run']}"
                         used_labels.add(label)

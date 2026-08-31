@@ -464,6 +464,15 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 "La previsione viene aggiornata a ogni candela M1 completa; l'orizzonte indica quanto avanti "
                 "nel tempo il modello cerca di prevedere, non ogni quanto viene eseguito."
             )
+            probability = displayed_inference.probability_up
+            if probability is not None and selected_state["last_signal"] == "NO_TRADE":
+                buy_gap = max(0.0, selected_account.config.buy_threshold - float(probability))
+                sell_gap = max(0.0, float(probability) - selected_account.config.sell_threshold)
+                st.caption(
+                    f"Fascia neutra: BUY da {selected_account.config.buy_threshold:.0%} in su, "
+                    f"SELL fino a {selected_account.config.sell_threshold:.0%}. "
+                    f"Per il segnale attuale mancano {buy_gap:.1%} al BUY oppure {sell_gap:.1%} al SELL."
+                )
         else:
             with st.container(horizontal=True):
                 st.metric(
