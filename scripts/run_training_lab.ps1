@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Quick,
-    [int]$Rows = 500000
+    [int]$Rows = 500000,
+    [switch]$SkipRefresh
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,11 +11,19 @@ Set-Location -LiteralPath $ProjectRoot
 
 $Stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $OutputRoot = Join-Path $ProjectRoot "results\training_lab\$Stamp"
+if (-not $SkipRefresh) {
+    & powershell -ExecutionPolicy Bypass -File .\scripts\refresh_training_data.ps1
+    if ($LASTEXITCODE -ne 0) { throw "Aggiornamento dati fallito: $LASTEXITCODE" }
+}
+$Snapshot = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'data\processed\training_snapshots') -Filter '*.parquet' |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+if (-not $Snapshot) { throw "Nessuno snapshot training disponibile" }
 $Arguments = @(
     '-m', 'src.experiments.run_cost_aware_lab',
     '--project-root', $ProjectRoot,
     '--output-root', $OutputRoot,
-    '--rows', $Rows
+    '--rows', $Rows,
+    '--data-path', $Snapshot
 )
 
 if ($Quick) {

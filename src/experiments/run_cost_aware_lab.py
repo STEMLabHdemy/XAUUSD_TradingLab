@@ -49,6 +49,7 @@ def run_lab(
     rows: int,
     horizons: tuple[int, ...],
     minimum_moves: tuple[float, ...],
+    data_path: Path | None = None,
 ) -> pd.DataFrame:
     """Train and audit every combination sequentially to keep the PC responsive."""
     output_root.mkdir(parents=True, exist_ok=True)
@@ -66,7 +67,7 @@ def run_lab(
         run_root = output_root / label
         print(f"[{number}/{len(combinations)}] START {label}", flush=True)
         try:
-            metrics = train_cost_aware(project_root, run_root, rows, horizon, movement)
+            metrics = train_cost_aware(project_root, run_root, rows, horizon, movement, data_path)
             _, audited = search(run_root, horizon)
             oos = metrics[metrics.evaluation.eq("untouched_oos")].copy()
             oos["selection_score"] = oos.walk_auc_mean + oos.walk_auc_min - .5 * oos.walk_auc_std
@@ -113,10 +114,11 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=500_000)
     parser.add_argument("--horizons", type=int, nargs="+", default=[5, 10, 15, 30])
     parser.add_argument("--minimum-moves", type=float, nargs="+", default=[.25, .50, .75])
+    parser.add_argument("--data-path", type=Path)
     args = parser.parse_args()
     summary = run_lab(
         args.project_root.resolve(), args.output_root.resolve(), args.rows,
-        tuple(args.horizons), tuple(args.minimum_moves),
+        tuple(args.horizons), tuple(args.minimum_moves), args.data_path.resolve() if args.data_path else None,
     )
     print("\nFINAL SUMMARY")
     print(summary.to_string(index=False))

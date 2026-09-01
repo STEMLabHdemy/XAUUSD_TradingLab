@@ -33,8 +33,8 @@ class Candidate:
     scale: bool = False
 
 
-def candidates() -> tuple[Candidate, ...]:
-    return (
+def candidates(names: tuple[str, ...] | None = None) -> tuple[Candidate, ...]:
+    available = (
         Candidate("logistic_c0p1", "logistic", {"C": .1}, True),
         Candidate("logistic_c1", "logistic", {"C": 1.0}, True),
         Candidate("lightgbm_shallow", "lightgbm", {"n_estimators": 150, "learning_rate": .05, "max_depth": 3, "num_leaves": 15}),
@@ -42,6 +42,12 @@ def candidates() -> tuple[Candidate, ...]:
         Candidate("xgboost_shallow", "xgboost", {"n_estimators": 150, "learning_rate": .05, "max_depth": 3}),
         Candidate("xgboost_medium", "xgboost", {"n_estimators": 250, "learning_rate": .04, "max_depth": 5}),
     )
+    if names is None:
+        return available
+    unknown = set(names).difference(candidate.name for candidate in available)
+    if unknown:
+        raise ValueError(f"Unknown candidates: {sorted(unknown)}")
+    return tuple(candidate for candidate in available if candidate.name in names)
 
 
 def _estimator(candidate: Candidate) -> object:
@@ -128,9 +134,11 @@ def train_cost_aware(
     rows: int,
     horizon: int,
     minimum_move: float,
+    data_path: Path | None = None,
+    candidate_names: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     features, target, labelled = _dataset(
-        project_root / "data/processed/XAUUSD_M1_MASTER.parquet",
+        data_path or project_root / "data/processed/XAUUSD_M1_MASTER.parquet",
         rows, horizon, minimum_move,
     )
     development, oos = temporal_development_oos_split(len(features), oos_fraction=.20, gap=60)
@@ -150,7 +158,8 @@ def train_cost_aware(
     ]].reset_index(drop=True)
     result_rows: list[dict[str, object]] = []
 
-    for candidate_number, candidate in enumerate(candidates(), start=1):
+    selected_candidates = candidates(candidate_names)
+    for candidate_number, candidate in enumerate(selected_candidates, start=1):
         fold_values: list[dict[str, float]] = []
         for fold, (train_index, test_index) in enumerate(walk.split(len(development)), start=1):
             model = _fit(candidate, features.iloc[train_index], target.iloc[train_index])
@@ -163,7 +172,7 @@ def train_cost_aware(
                 "train_end": labelled.datetime_utc.iloc[train_index[-1]],
                 "test_start": labelled.datetime_utc.iloc[test_index[0]], **metrics,
             })
-        print(f"candidate {candidate_number}/{len(candidates())} final fit: {candidate.name}", flush=True)
+        print(f"candidate {candidate_number}/{len(selected_candidates)} final fit: {candidate.name}", flush=True)
         final_model = _fit(candidate, features.iloc[development], target.iloc[development])
         probabilities = final_model.predict_proba(features.iloc[oos])
         metrics = _metrics(target.iloc[oos], probabilities)
@@ -191,7 +200,8 @@ def train_cost_aware(
         "status": "research_only", "rows_requested": rows, "usable_rows": len(features),
         "horizon_minutes": horizon, "minimum_net_move": minimum_move,
         "slippage_price_per_side": .05, "labels": LABELS,
-        "feature_columns": list(features.columns), "candidates": [candidate.name for candidate in candidates()],
+        "feature_columns": list(features.columns), "candidates": [candidate.name for candidate in selected_candidates],
+        "data_path": str(data_path or project_root / "data/processed/XAUUSD_M1_MASTER.parquet"),
         "random_shuffle": False, "purge_gap_rows": 60, "oos_rows": len(oos),
     }
     (output_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -205,10 +215,13 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=500_000)
     parser.add_argument("--horizon", type=int, required=True)
     parser.add_argument("--minimum-move", type=float, default=.50)
+    parser.add_argument("--data-path", type=Path)
+    parser.add_argument("--candidates", nargs="+")
     args = parser.parse_args()
     metrics = train_cost_aware(
         args.project_root.resolve(), args.output_root.resolve(), args.rows,
-        args.horizon, args.minimum_move,
+        args.horizon, args.minimum_move, args.data_path.resolve() if args.data_path else None,
+        tuple(args.candidates) if args.candidates else None,
     )
     print(metrics[metrics.evaluation.eq("untouched_oos")].to_string(index=False))
     return 0
