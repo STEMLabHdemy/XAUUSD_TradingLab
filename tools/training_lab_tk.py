@@ -91,7 +91,8 @@ class TrainingLab(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("XAUUSD Training Lab — research only")
-        self.geometry("820x620")
+        self.geometry("1280x860")
+        self.minsize(1050, 720)
         self.process: subprocess.Popen[str] | None = None
         self.snapshot_var = tk.StringVar(value=str(latest_snapshot() or "Nessuno: aggiorna prima i dati"))
         defaults = recommendations()
@@ -125,8 +126,6 @@ class TrainingLab(tk.Tk):
         self.launch_button = ttk.Button(actions, text="Avvia training + audit", command=self.launch)
         self.launch_button.pack(side="left", padx=8)
         ttk.Label(outer, textvariable=self.status_var, wraplength=760).pack(anchor="w")
-        self.log = tk.Text(outer, height=16, wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True, pady=(8, 0))
         self._build_results(outer)
         self.refresh_results()
 
@@ -138,7 +137,7 @@ class TrainingLab(tk.Tk):
         ttk.Button(controls, text="Apri cartella selezionata", command=self.open_result_folder).pack(side="left", padx=8)
         ttk.Label(controls, textvariable=self.results_var).pack(side="left", padx=8)
         columns = ("run", "model", "horizon", "move", "oos_auc", "audit_pf", "audit_pnl", "audit_dd", "audit_trades", "verdict")
-        self.tree = ttk.Treeview(results, columns=columns, show="headings", height=9)
+        self.tree = ttk.Treeview(results, columns=columns, show="headings", height=26)
         headings = {
             "run": "Run", "model": "Modello", "horizon": "H", "move": "Move", "oos_auc": "AUC OOS",
             "audit_pf": "PF audit", "audit_pnl": "PnL audit", "audit_dd": "DD audit", "audit_trades": "Trade", "verdict": "Verdetto",
@@ -181,7 +180,10 @@ class TrainingLab(tk.Tk):
             os.startfile(folder)  # type: ignore[attr-defined]  # Windows-only desktop utility
 
     def append(self, text: str) -> None:
-        self.log.configure(state="normal"); self.log.insert("end", text); self.log.see("end"); self.log.configure(state="disabled")
+        # Keep the desktop tool focused on decisions, not a terminal transcript.
+        message = text.strip()
+        if message:
+            self.status_var.set(message[-220:])
 
     def apply_recommendations(self) -> None:
         values = recommendations(); self.rows_var.set(values["rows"]); self.horizon_var.set(values["horizon"]); self.move_var.set(values["move"])
