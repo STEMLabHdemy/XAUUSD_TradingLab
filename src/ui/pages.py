@@ -234,7 +234,9 @@ def backtest_page() -> None:
     market = load_market_range(int(predictions.timestamp.min()), int(predictions.timestamp.max()))
     figure = _candlestick(market.tail(1500), "Historical BID/ASK-aware backtest")
     visible_start = market.tail(1500).datetime_utc.min()
-    visible_trades = trades[pd.to_datetime(trades.entry_time, utc=True) >= visible_start] if not trades.empty else trades
+    visible_trades = trades[
+        pd.to_datetime(trades.entry_time, utc=True, format="ISO8601") >= visible_start
+    ] if not trades.empty else trades
     if not visible_trades.empty:
         longs = visible_trades[visible_trades.side.eq("LONG")]
         shorts = visible_trades[visible_trades.side.eq("SHORT")]

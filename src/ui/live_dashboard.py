@@ -138,8 +138,8 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
-    frame["Apertura"] = pd.to_datetime(frame["Apertura"], utc=True).dt.tz_convert(display_timezone)
-    frame["Chiusura"] = pd.to_datetime(frame["Chiusura"], utc=True, errors="coerce").dt.tz_convert(display_timezone)
+    frame["Apertura"] = pd.to_datetime(frame["Apertura"], utc=True, format="ISO8601").dt.tz_convert(display_timezone)
+    frame["Chiusura"] = pd.to_datetime(frame["Chiusura"], utc=True, format="ISO8601", errors="coerce").dt.tz_convert(display_timezone)
     return frame.sort_values("Apertura", ascending=False).reset_index(drop=True)
 
 
@@ -243,7 +243,9 @@ def live_candlestick_figure(
     has_markers = False
     if events is not None and not events.empty:
         event_frame = events.copy()
-        event_frame["local_time"] = pd.to_datetime(event_frame.timestamp, utc=True).dt.tz_convert(display_timezone)
+        event_frame["local_time"] = pd.to_datetime(
+            event_frame.timestamp, utc=True, format="ISO8601"
+        ).dt.tz_convert(display_timezone)
         event_frame = event_frame[event_frame.local_time.between(local_time.min(), local_time.max())]
         has_markers = not event_frame.empty
         for event, symbol, color in (("BUY", "triangle-up", "#22C55E"), ("SELL", "triangle-down", "#EF4444"), ("EXIT", "x", "#F59E0B")):
