@@ -114,6 +114,7 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
             mark = float(tick.bid if side == "LONG" else tick.ask)
             quantity = float(position["quantity"])
             rows.append({
+                "Run ID": state.get("run_id"), "Strategia": account.config.strategy_id,
                 "Stato": "APERTO", "Modello": model, "Trade": position["trade_id"],
                 "Direzione": side, "Apertura": position["entry_time"], "Chiusura": None,
                 "Ingresso": float(position["entry_price"]), "Prezzo/Uscita": mark,
@@ -125,6 +126,8 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
         for trade in state.get("trades", []):
             quantity = float(trade["quantity"])
             rows.append({
+                "Run ID": trade.get("run_id", state.get("run_id")),
+                "Strategia": trade.get("strategy_id", account.config.strategy_id),
                 "Stato": "CHIUSO", "Modello": model, "Trade": trade["trade_id"],
                 "Direzione": trade["side"], "Apertura": trade["entry_time"],
                 "Chiusura": trade["exit_time"], "Ingresso": float(trade["entry_price"]),
@@ -162,6 +165,18 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
             st.metric("Posizioni aperte", f"{totals['open_positions']} / {total_slots}", border=True)
             st.metric("Esposizione", f"{totals['exposure']:,.2f} USD", border=True)
             st.metric("Margine usato", f"{totals['used_margin']:,.2f} USD", border=True)
+
+        st.markdown("**PnL per portafoglio**")
+        with st.container(horizontal=True):
+            for strategy, account in runtime.accounts.items():
+                state = account.snapshot()
+                total_pnl = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
+                st.metric(
+                    strategy,
+                    f"{total_pnl:+,.2f} USD",
+                    f"aperto {float(state['unrealized_pnl']):+,.2f} · chiuso {float(state['realized_pnl']):+,.2f}",
+                    border=True,
+                )
 
         positions = _open_positions_frame(runtime, tick, display_timezone)
         st.markdown("**Posizioni aperte adesso**")
@@ -606,6 +621,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
 
             st.subheader("Confronto tra modelli", help="Stesso feed e stessa configurazione, stato e PnL indipendenti.")
             comparison = runtime.comparison().rename(columns={
+                "run_id": "Run ID", "strategy_id": "ID", "source_model": "Modello sorgente",
                 "model": "Modello", "status": "Stato", "balance": "Saldo", "equity": "Equity",
                 "realized_pnl": "PnL realizzato", "unrealized_pnl": "PnL aperto", "total_pnl": "PnL totale",
                 "return_pct": "Rendimento", "free_margin": "Margine libero", "trades": "Trade",
@@ -688,7 +704,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     st.rerun(scope="fragment")
 
             st.subheader("Registro completo dei trade")
-            st.caption("Tutte le posizioni aperte e tutti i trade chiusi, riuniti per ogni modello paper.")
+            st.caption(f"Run ID: {runtime.run_id}. Tutte le posizioni aperte e i trade chiusi, filtrabili per strategia.")
             ledger = _all_trades_frame(runtime, tick, service.display_timezone)
             if ledger.empty:
                 st.caption("Nessun trade aperto o chiuso per ora.")
@@ -699,7 +715,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                         key="paper_ledger_status", required=True,
                     )
                     model_filter = st.multiselect(
-                        "Modelli", list(runtime.accounts), default=list(runtime.accounts),
+                        "Strategie", list(runtime.accounts), default=list(runtime.accounts),
                         key="paper_ledger_models",
                     )
                 visible_ledger = ledger[ledger["Modello"].isin(model_filter)]
@@ -711,7 +727,9 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 st.dataframe(
                     styled_ledger, width="stretch", hide_index=True, height=420,
                     column_config={
-                        "Modello": st.column_config.TextColumn(pinned=True),
+                    "Run ID": st.column_config.TextColumn(pinned=True),
+                    "Strategia": st.column_config.TextColumn(pinned=True),
+                    "Modello": st.column_config.TextColumn(),
                         "Apertura": st.column_config.DatetimeColumn(format="DD/MM/YY HH:mm:ss"),
                         "Chiusura": st.column_config.DatetimeColumn(format="DD/MM/YY HH:mm:ss"),
                         "Ingresso": st.column_config.NumberColumn(format="%.2f"),
@@ -726,6 +744,25 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     },
                 )
                 st.download_button(
-                    "Esporta tutto in CSV", ledger.to_csv(index=False), "paper_trades_completo.csv", "text/csv",
+                    "Esporta filtro trade in CSV", visible_ledger.to_csv(index=False),
+                    f"{runtime.run_id}_trades_filtrati.csv", "text/csv",
                     icon=":material/download:",
                 )
+            with st.expander("Export audit completo"):
+                signals = runtime.signals_frame()
+                events = runtime.events_frame()
+                snapshots = runtime.portfolio_history_frame()
+                st.caption("Signal log: una riga per candela M1; eventi: decisioni, lock, reversal e protezioni; snapshot: stato portafoglio nel tempo.")
+                with st.container(horizontal=True):
+                    st.download_button(
+                        "Esporta segnali M1", signals.to_csv(index=False), f"{runtime.run_id}_signals_m1.csv", "text/csv",
+                        disabled=signals.empty, icon=":material/download:",
+                    )
+                    st.download_button(
+                        "Esporta eventi strategie", events.to_csv(index=False), f"{runtime.run_id}_events.csv", "text/csv",
+                        disabled=events.empty, icon=":material/download:",
+                    )
+                    st.download_button(
+                        "Esporta equity e stato", snapshots.to_csv(index=False), f"{runtime.run_id}_portfolio_history.csv", "text/csv",
+                        disabled=snapshots.empty, icon=":material/download:",
+                    )

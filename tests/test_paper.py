@@ -241,6 +241,10 @@ class PaperAccountTests(unittest.TestCase):
             account.process(tick(4, 100, 101), inference(4, .5))
             account.process(tick(5, 100, 101), inference(5, .9))
             self.assertEqual(len(account.snapshot()["positions"]), 1)
+            events = account.events_frame()
+            self.assertIn("DIRECTION_LOCK_ON", set(events.event))
+            self.assertIn("DIRECTION_LOCK_ARMED", set(events.event))
+            self.assertIn("DIRECTION_LOCK_OFF", set(events.event))
 
     def test_smart_short_requires_two_consecutive_reversals(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -256,6 +260,7 @@ class PaperAccountTests(unittest.TestCase):
             state = account.snapshot()
             self.assertEqual(state["positions"], [])
             self.assertEqual(state["trades"][-1]["exit_reason"], "smart short confirmed reversal")
+            self.assertEqual(list(account.events_frame().query("event == 'SMART_SHORT_REVERSAL'").stage), ["first", "second"])
 
     def test_smart_short_locks_and_trails_without_widening_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -267,6 +272,22 @@ class PaperAccountTests(unittest.TestCase):
             position = account.snapshot()["positions"][0]
             self.assertLess(position["stop_loss"], 100)
             self.assertTrue(any(row["event"] == "SMART_PROTECT" for row in account.snapshot()["events"]))
+
+    def test_every_completed_bar_persists_decision_and_portfolio_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory)
+            account.set_run_id("run-test")
+            account.start()
+            neutral = inference(0, .5)
+            account.process(tick(0, 100, 101), neutral)
+            event = account.events_frame().query("event == 'SIGNAL_DECISION'").iloc[-1]
+            self.assertEqual(event.run_id, "run-test")
+            self.assertEqual(event.predicted_class, "BUY")
+            self.assertEqual(event.decision, "NO_TRADE")
+            snapshot = account.snapshot()["portfolio_history"][-1]
+            self.assertEqual(snapshot["run_id"], "run-test")
+            self.assertIn("max_drawdown", snapshot)
+            self.assertIn("open_positions", snapshot)
 
     def test_runtime_fans_one_inference_out_to_all_strategies(self) -> None:
         class CountingEngine:
@@ -290,6 +311,24 @@ class PaperAccountTests(unittest.TestCase):
             runtime.process(tick(0, 100, 101), bars)
             self.assertEqual(runtime.engine.calls, 1)
             self.assertEqual({account.snapshot()["last_signal_id"] for account in runtime.accounts.values()}, {12345})
+
+    def test_shared_signal_log_is_deduplicated_by_signal_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = PaperRuntime.__new__(PaperRuntime)
+            runtime.run_id = "run-test"
+            runtime.run_metadata_path = Path(directory) / "run.json"
+            runtime.signal_log_path = Path(directory) / "signals.jsonl"
+            runtime.run_metadata_path.write_text('{"run_id":"run-test"}', encoding="utf-8")
+            signal = LiveInference(
+                True, "test", 15, .6, pd.Timestamp("2026-08-28 10:00", tz="UTC"),
+                "BUY", "NO_TRADE", "test", probability_down=.2, probability_neutral=.2, signal_id=99,
+            )
+            runtime._record_shared_signal(tick(0, 100, 101), signal)
+            runtime._record_shared_signal(tick(0, 100, 101), signal)
+            rows = runtime.signals_frame()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows.iloc[0].signal_id, 99)
+            self.assertEqual(rows.iloc[0].p_neutral, .2)
 
     def test_runtime_exposes_selected_model_inference(self) -> None:
         runtime = PaperRuntime.__new__(PaperRuntime)

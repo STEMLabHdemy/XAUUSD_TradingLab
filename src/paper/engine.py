@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import time
+from datetime import datetime, time, timezone
 import hashlib
 import json
 import math
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -121,6 +122,7 @@ class PaperAccount:
             "used_margin": 0.0, "free_margin": self.config.starting_capital,
             "exposure": 0.0, "peak_equity": self.config.starting_capital, "max_drawdown": 0.0,
             "position": None, "positions": [], "trades": [], "events": [], "equity_history": [],
+            "portfolio_history": [], "run_id": None,
             "pending_direction": None, "persistence_count": 0, "last_exit_time": None,
             "last_entry_time": None,
             "last_processed_bar": None, "last_signal": "NO_TRADE", "last_reason": "paper stopped",
@@ -137,6 +139,8 @@ class PaperAccount:
         if "positions" not in state:
             state["positions"] = [state["position"]] if state.get("position") else []
         state.setdefault("last_entry_time", None)
+        state.setdefault("portfolio_history", [])
+        state.setdefault("run_id", None)
         state.setdefault("last_signal_id", None)
         state.setdefault("short_reversal_count", 0)
         state.setdefault("short_protect_mode", False)
@@ -177,6 +181,12 @@ class PaperAccount:
             self.state["config"] = asdict(config)
             self.state["config_fingerprint"] = config.fingerprint
             self.state["last_reason"] = "configurazione aggiornata; storico e posizioni preservati"
+            self._save()
+
+    def set_run_id(self, run_id: str) -> None:
+        """Attach an experiment identifier without touching positions or ledger."""
+        with self._lock:
+            self.state["run_id"] = run_id
             self._save()
 
     def _save(self) -> None:
@@ -319,15 +329,51 @@ class PaperAccount:
         future_cost = self.config.slippage_price_per_side * quantity + self.config.commission_per_unit_per_side * quantity
         return gross - float(position["entry_costs"]) - future_cost
 
-    def _block_direction_after_stop(self, side: str) -> None:
+    def _record_event(self, event: str, tick: MarketTick, **values: Any) -> None:
+        self.state["events"].append({
+            "event": event, "timestamp": tick.datetime_utc.isoformat(),
+            "run_id": self.state.get("run_id"), "strategy_id": self.config.strategy_id,
+            "model": self.model, "signal_id": self.state.get("last_signal_id"),
+            **values,
+        })
+
+    def _append_portfolio_snapshot(self, tick: MarketTick) -> None:
+        self.state["portfolio_history"].append({
+            "timestamp": tick.datetime_utc.isoformat(), "run_id": self.state.get("run_id"),
+            "strategy_id": self.config.strategy_id, "signal_id": self.state.get("last_signal_id"),
+            "balance": self.state["balance"], "equity": self.state["equity"],
+            "realized_pnl": self.state["realized_pnl"], "unrealized_pnl": self.state["unrealized_pnl"],
+            "max_drawdown": self.state["max_drawdown"], "exposure": self.state["exposure"],
+            "used_margin": self.state["used_margin"], "free_margin": self.state["free_margin"],
+            "open_positions": len(self._positions()),
+        })
+        self.state["portfolio_history"] = self.state["portfolio_history"][-20_000:]
+
+    def _record_decision(self, tick: MarketTick, inference: LiveInference, signal: str, reason: str) -> None:
+        """Persist every completed-candle decision, including explicit no-trade outcomes."""
+        self._record_event(
+            "SIGNAL_DECISION", tick,
+            inference_timestamp=inference.inference_time_utc.isoformat() if inference.inference_time_utc is not None else None,
+            bid=tick.bid, ask=tick.ask, spread=tick.spread,
+            p_up=inference.probability_up, p_down=inference.probability_down,
+            p_neutral=inference.probability_neutral, predicted_class=inference.candidate,
+            decision=signal, decision_reason=reason, open_positions=len(self._positions()),
+            direction_locks=json.loads(json.dumps(self.state["reentry_gates"])),
+            short_reversal_count=self.state.get("short_reversal_count", 0),
+            short_protect_mode=self.state.get("short_protect_mode", False),
+        )
+        self._append_portfolio_snapshot(tick)
+
+    def _block_direction_after_stop(self, side: str, tick: MarketTick) -> None:
         if not self.config.anti_burst_enabled:
             return
         gate = self.state["reentry_gates"].setdefault(
             side, {"blocked": False, "non_directional_bars": 0, "rearmed": False},
         )
         gate.update(blocked=True, non_directional_bars=0, rearmed=False)
+        self._record_event("DIRECTION_LOCK_ON", tick, side=side, reason="stop_loss", lock_state=gate.copy())
 
-    def _update_reentry_gates(self, candidate: str | None) -> None:
+    def _update_reentry_gates(self, tick: MarketTick, candidate: str | None) -> None:
         """Require two non-directional bars and a later return after a stopped-out side."""
         if not self.config.anti_burst_enabled:
             return
@@ -337,10 +383,12 @@ class PaperAccount:
                 continue
             if candidate_side != side:
                 gate["non_directional_bars"] = int(gate.get("non_directional_bars", 0)) + 1
-                if gate["non_directional_bars"] >= 2:
+                if gate["non_directional_bars"] >= 2 and not gate.get("rearmed"):
                     gate["rearmed"] = True
+                    self._record_event("DIRECTION_LOCK_ARMED", tick, side=side, lock_state=gate.copy())
             elif gate.get("rearmed"):
                 gate.update(blocked=False, non_directional_bars=0, rearmed=False)
+                self._record_event("DIRECTION_LOCK_OFF", tick, side=side, reason="direction_returned", lock_state=gate.copy())
 
     def _side_is_blocked(self, side: str) -> bool:
         return bool(self.config.anti_burst_enabled and self.state["reentry_gates"].get(side, {}).get("blocked"))
@@ -369,12 +417,14 @@ class PaperAccount:
             old_stop = position.get("stop_loss")
             if old_stop is None or desired_stop < float(old_stop):
                 position["stop_loss"] = desired_stop
-                self.state["events"].append({
-                    "event": "SMART_PROTECT", "timestamp": tick.datetime_utc.isoformat(),
-                    "trade_id": position["trade_id"], "model": self.model, "side": "SHORT",
-                    "price": tick.ask, "old_stop_loss": old_stop, "stop_loss": desired_stop,
-                    "net_pnl_at_update": pnl, "signal_id": self.state.get("last_signal_id"),
-                })
+                protection = "break_even" if protected_pnl == 0 else "lock"
+                if pnl >= self.config.short_protect_trailing_trigger_pnl:
+                    protection = "trailing"
+                self._record_event(
+                    "SMART_PROTECT", tick, trade_id=position["trade_id"], side="SHORT", price=tick.ask,
+                    old_stop_loss=old_stop, stop_loss=desired_stop, net_pnl_at_update=pnl,
+                    protection=protection,
+                )
                 changed += 1
         return changed
 
@@ -393,7 +443,8 @@ class PaperAccount:
             "raw_entry_price": raw, "entry_price": price, "quantity": quantity,
             "confidence": inference.probability_up, "spread": tick.spread, "stop_loss": stop,
             "take_profit": take, "entry_costs": (slip + self.config.commission_per_unit_per_side) * quantity,
-            "model": self.model, "regime": "not_available", "expected_return": None, "reason": reason,
+            "model": self.model, "strategy_id": self.config.strategy_id, "run_id": self.state.get("run_id"),
+            "regime": "not_available", "expected_return": None, "reason": reason,
             "signal_id": inference.signal_id,
         }
         self._positions().append(position)
@@ -418,6 +469,7 @@ class PaperAccount:
             "quantity": quantity, "confidence": position["confidence"], "spread": position["spread"],
             "stop_loss": position["stop_loss"], "take_profit": position["take_profit"], "exit_reason": reason,
             "gross_pnl": gross, "costs": costs, "net_pnl": net, "model": self.model,
+            "strategy_id": self.config.strategy_id, "run_id": self.state.get("run_id"),
             "signal_id": self.state.get("last_signal_id"),
         }
         self.state["trades"].append(row)
@@ -430,7 +482,7 @@ class PaperAccount:
         self.state["pending_direction"] = None
         self.state["persistence_count"] = 0
         if reason == "stop_loss":
-            self._block_direction_after_stop(str(position["side"]))
+            self._block_direction_after_stop(str(position["side"]), tick)
 
     def _close_all(self, tick: MarketTick, reason: str) -> int:
         positions = list(self._positions())
@@ -476,13 +528,15 @@ class PaperAccount:
             if protective_exits:
                 self.state["last_signal"] = "EXIT"
                 self.state["last_reason"] = f"{protective_exits} protective exit(s)"
-                self._mark(tick)
+                self._mark(tick, save=False)
+                self._record_decision(tick, inference, "EXIT", self.state["last_reason"])
+                self._save()
                 return
             score = float(inference.probability_up)
             signal, reason = "NO_TRADE", "inside no-trade zone"
             positions = self._positions()
             candidate = "BUY" if score >= self.config.buy_threshold else "SELL" if score <= self.config.sell_threshold else None
-            self._update_reentry_gates(candidate)
+            self._update_reentry_gates(tick, candidate)
             if positions:
                 side = str(positions[0]["side"])
                 exit_long = side == "LONG" and score < self.config.probability_exit_threshold
@@ -494,14 +548,18 @@ class PaperAccount:
                         if reversals < self.config.short_reversal_confirmations:
                             self.state["short_protect_mode"] = True
                             signal, reason = "HOLD", f"smart short protect mode: reversal {reversals}/{self.config.short_reversal_confirmations}"
+                            self._record_event("SMART_SHORT_REVERSAL", tick, stage="first", action="protect", reversals=reversals)
                             smart_updates += self._apply_smart_short_protection(tick)
                         else:
                             signal, reason = "EXIT", "smart short confirmed reversal"
+                            self._record_event("SMART_SHORT_REVERSAL", tick, stage="second", action="close", reversals=reversals)
                             closed = self._close_all(tick, reason)
                             self.state["short_reversal_count"] = 0
                             self.state["short_protect_mode"] = False
                             self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
-                            self._mark(tick)
+                            self._mark(tick, save=False)
+                            self._record_decision(tick, inference, signal, self.state["last_reason"])
+                            self._save()
                             return
                     else:
                         signal, reason = "EXIT", "probability reversal"
@@ -509,7 +567,9 @@ class PaperAccount:
                         self.state["short_reversal_count"] = 0
                         self.state["short_protect_mode"] = False
                         self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
-                        self._mark(tick)
+                        self._mark(tick, save=False)
+                        self._record_decision(tick, inference, signal, self.state["last_reason"])
+                        self._save()
                         return
                 elif side == "SHORT":
                     self.state["short_reversal_count"] = 0
@@ -564,6 +624,7 @@ class PaperAccount:
                 reason = f"{reason}; smart short protection tightened on {smart_updates} position(s)"
             self.state["last_signal"], self.state["last_reason"] = signal, reason
             self._mark(tick, save=False)
+            self._record_decision(tick, inference, signal, reason)
             self.state["equity_history"].append({"timestamp": tick.datetime_utc.isoformat(), "equity": self.state["equity"], "balance": self.state["balance"]})
             self.state["equity_history"] = self.state["equity_history"][-10_000:]
             self._save()
@@ -589,6 +650,10 @@ class PaperRuntime:
 
     def __init__(self, root: Path | str, config: PaperConfig):
         self.root, self.config = Path(root), config
+        self.comparison_directory = self.root / "data/live/paper/comparison_v1"
+        self.run_metadata_path = self.comparison_directory / "run.json"
+        self.run_id = self._load_or_create_run()
+        self.signal_log_path = self.comparison_directory / "signals.jsonl"
         manifest = self.root / "models/baseline_manifest_provisional.json"
         definitions: list[tuple[str, Path, Path, str, str]] = [
             ("LightGBM", self.root / "models/lightgbm_up_5m_sigmoid_provisional.joblib", manifest, "lightgbm", "binary"),
@@ -624,12 +689,49 @@ class PaperRuntime:
             account_key = f"comparison_v1_{key}_{strategy_id.lower()}"
             strategy_config = self._strategy_config(config, strategy_id, anti_burst, smart_short, maximum)
             self.accounts[label] = PaperAccount(
-                account_key, label, strategy_config, self.root / "data/live/paper/comparison_v1",
+                account_key, label, strategy_config, self.comparison_directory,
             )
+            self.accounts[label].set_run_id(self.run_id)
         self._last_bar: int | None = None
         self._inference: LiveInference | None = None
         self._inferences: dict[str, LiveInference] = {}
         self._lock = RLock()
+
+    def _load_or_create_run(self) -> str:
+        self.comparison_directory.mkdir(parents=True, exist_ok=True)
+        if self.run_metadata_path.exists():
+            try:
+                metadata = json.loads(self.run_metadata_path.read_text(encoding="utf-8"))
+                if isinstance(metadata.get("run_id"), str):
+                    return metadata["run_id"]
+            except (OSError, json.JSONDecodeError):
+                pass
+        run_id = f"abcd_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
+        self.run_metadata_path.write_text(json.dumps({
+            "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
+            "experiment": "four_way_paper_comparison", "strategies": [item[0] for item in self.STRATEGIES],
+        }, indent=2), encoding="utf-8")
+        return run_id
+
+    def _record_shared_signal(self, tick: MarketTick, inference: LiveInference) -> None:
+        if inference.signal_id is None:
+            return
+        metadata = json.loads(self.run_metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("last_signal_id") == inference.signal_id:
+            return
+        row = {
+            "run_id": self.run_id, "signal_id": inference.signal_id,
+            "timestamp": inference.inference_time_utc.isoformat() if inference.inference_time_utc is not None else None,
+            "tick_timestamp": tick.datetime_utc.isoformat(), "bid": tick.bid, "ask": tick.ask, "spread": tick.spread,
+            "p_up": inference.probability_up, "p_down": inference.probability_down,
+            "p_neutral": inference.probability_neutral, "predicted_class": inference.candidate,
+            "model": inference.model, "horizon_minutes": inference.horizon_minutes,
+        }
+        with self.signal_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        metadata["last_signal_id"] = inference.signal_id
+        metadata["last_signal_timestamp"] = row["timestamp"]
+        self.run_metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
     def _strategy_config(
@@ -654,9 +756,34 @@ class PaperRuntime:
                 self._inference = replace(inference, signal_id=latest) if inference.available else inference
                 self._inferences = {name: self._inference for name in self.accounts}
                 self._last_bar = latest
+                if self._inference.available and hasattr(self, "run_metadata_path"):
+                    self._record_shared_signal(tick, self._inference)
             if self._inference is not None:
                 for account in self.accounts.values():
                     account.process(tick, self._inference)
+
+    def signals_frame(self) -> pd.DataFrame:
+        if not self.signal_log_path.exists():
+            return pd.DataFrame()
+        rows = [json.loads(line) for line in self.signal_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return pd.DataFrame(rows)
+
+    def events_frame(self) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        for account in self.accounts.values():
+            for event in account.snapshot().get("events", []):
+                rows.append({
+                    "run_id": self.run_id, "strategy_id": account.config.strategy_id,
+                    "strategy": account.model, **event,
+                })
+        return pd.DataFrame(rows)
+
+    def portfolio_history_frame(self) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        for account in self.accounts.values():
+            for snapshot in account.snapshot().get("portfolio_history", []):
+                rows.append({"run_id": self.run_id, "strategy": account.model, **snapshot})
+        return pd.DataFrame(rows)
 
     def comparison(self) -> pd.DataFrame:
         rows = []
@@ -666,6 +793,7 @@ class PaperRuntime:
             total_pnl = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
             rows.append({
                 "model": name,
+                "run_id": getattr(self, "run_id", "N/D"),
                 "strategy_id": account.config.strategy_id,
                 "source_model": getattr(self, "source_model_label", "N/D"),
                 "status": "RUNNING" if state["running"] else "STOPPED",
