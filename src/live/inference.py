@@ -21,6 +21,9 @@ class LiveInference:
     candidate: str
     final_signal: str
     reason: str
+    probability_down: float | None = None
+    probability_neutral: float | None = None
+    signal_id: int | None = None
 
 
 class LiveInferenceEngine:
@@ -67,6 +70,7 @@ class LiveInferenceEngine:
             True, str(model_name), horizon, probability,
             pd.Timestamp(completed_m1.datetime_utc.iloc[-1]), candidate, "NO_TRADE",
             f"Modello singolo H{horizon}; conferma multi-orizzonte non ancora disponibile",
+            probability_down=1.0 - probability,
         )
 
 
@@ -117,4 +121,5 @@ class CostAwareLiveInferenceEngine:
             True, f"{self.model_path.stem} (cost-aware)", horizon, score,
             pd.Timestamp(completed_m1.datetime_utc.iloc[-1]), candidate, "NO_TRADE",
             f"Research-only cost-aware: DOWN {down:.1%}, NEUTRAL {neutral:.1%}, UP {up:.1%}",
+            probability_down=down, probability_neutral=neutral,
         )

@@ -342,7 +342,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=4)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=5)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:
@@ -380,7 +380,19 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         )
         selected_model = next(iter(runtime.accounts))
         if show_paper_controls:
-            selected_model = st.selectbox("Paper account / modello", list(runtime.accounts), key="paper_selected_model")
+            selected_model = st.selectbox("Strategia Paper", list(runtime.accounts), key="paper_selected_model")
+            with st.container(border=True):
+                st.markdown("**Esperimento comparativo A/B/C/D**")
+                st.caption(
+                    f"Una sola inferenza di **{runtime.source_model_label}** per candela M1 "
+                    "viene distribuita simultaneamente ai quattro ledger. A è il controllo invariato."
+                )
+                st.dataframe(pd.DataFrame([
+                    {"ID": "A", "Strategia": "Baseline", "Ingressi": "Raffica attuale", "Reversal LONG": "Immediato", "Reversal SHORT": "Immediato"},
+                    {"ID": "B", "Strategia": "Anti-raffica", "Ingressi": "1 posizione + blocco post-stop", "Reversal LONG": "Immediato", "Reversal SHORT": "Immediato"},
+                    {"ID": "C", "Strategia": "Smart SHORT", "Ingressi": "Raffica attuale", "Reversal LONG": "Immediato", "Reversal SHORT": "Proteggi, chiudi al 2°"},
+                    {"ID": "D", "Strategia": "Combinata", "Ingressi": "1 posizione + blocco post-stop", "Reversal LONG": "Immediato", "Reversal SHORT": "Proteggi, chiudi al 2°"},
+                ]), hide_index=True, width="stretch")
             mode_labels = {
                 "Controllata · 1 posizione": "controlled",
                 "Intermedia · fino a 3": "intermediate",
@@ -470,6 +482,8 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 "La previsione viene aggiornata a ogni candela M1 completa; l'orizzonte indica quanto avanti "
                 "nel tempo il modello cerca di prevedere, non ogni quanto viene eseguito."
             )
+            if displayed_inference.signal_id is not None:
+                st.caption(f"Evento condiviso #{displayed_inference.signal_id}: stesso segnale per A, B, C e D.")
             probability = displayed_inference.probability_up
             if probability is not None and not is_cost_aware and selected_state["last_signal"] == "NO_TRADE":
                 buy_gap = max(0.0, selected_account.config.buy_threshold - float(probability))
@@ -649,6 +663,13 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                         disabled=no_daily_trade_limit,
                     )
                     max_loss = st.number_input("Perdita max/giorno", min_value=0.0, value=float(cfg.max_daily_loss), step=100.0)
+                st.caption("Smart SHORT (usato da C e D): primo reversal protegge; il secondo consecutivo chiude.")
+                with st.container(horizontal=True):
+                    protect_be = st.number_input("PnL break-even", min_value=0.0, value=float(cfg.short_protect_break_even_pnl), step=.5)
+                    protect_lock_at = st.number_input("PnL attiva lock", min_value=0.0, value=float(cfg.short_protect_lock_trigger_pnl), step=.5)
+                    protect_lock = st.number_input("PnL bloccato", min_value=0.0, value=float(cfg.short_protect_lock_pnl), step=.5)
+                    protect_trail_at = st.number_input("PnL attiva trailing", min_value=0.0, value=float(cfg.short_protect_trailing_trigger_pnl), step=.5)
+                    protect_trail_distance = st.number_input("Distanza trailing", min_value=0.0, value=float(cfg.short_protect_trailing_distance), step=.5)
                 apply_confirm = st.checkbox("Confermo: applica e resetta tutti gli account", key="paper_config_confirm")
                 if st.button("Applica nuova configurazione", disabled=not apply_confirm, icon=":material/tune:"):
                     runtime.reconfigure_and_reset(PaperConfig(
@@ -657,7 +678,12 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                            "buy_threshold": buy, "sell_threshold": sell, "persistence": int(persistence),
                            "cooldown_minutes": int(cooldown), "max_allowed_spread": max_spread,
                            "commission_per_unit_per_side": commission, "slippage_price_per_side": slippage,
-                           "max_daily_trades": None if no_daily_trade_limit else int(max_trades), "max_daily_loss": max_loss}
+                           "max_daily_trades": None if no_daily_trade_limit else int(max_trades), "max_daily_loss": max_loss,
+                           "short_protect_break_even_pnl": protect_be,
+                           "short_protect_lock_trigger_pnl": protect_lock_at,
+                           "short_protect_lock_pnl": protect_lock,
+                           "short_protect_trailing_trigger_pnl": protect_trail_at,
+                           "short_protect_trailing_distance": protect_trail_distance}
                     ))
                     st.rerun(scope="fragment")
 

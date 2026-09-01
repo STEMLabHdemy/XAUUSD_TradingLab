@@ -19,3 +19,10 @@ entry_mode: burst
 session_flatten_enabled: true
 session_flatten_local_time: "22:55"
 session_timezone: Europe/Rome
+# Comparison V1: A baseline, B anti-raffica, C smart SHORT, D combined.
+short_protect_break_even_pnl: 2.0
+short_protect_lock_trigger_pnl: 4.0
+short_protect_lock_pnl: 2.0
+short_protect_trailing_trigger_pnl: 6.0
+short_protect_trailing_distance: 2.0
+short_reversal_confirmations: 2

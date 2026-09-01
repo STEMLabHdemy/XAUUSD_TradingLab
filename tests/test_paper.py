@@ -226,6 +226,71 @@ class PaperAccountTests(unittest.TestCase):
             account.process(tick(1, 100, 101), inference(1, .9))
             self.assertEqual(len(account.snapshot()["positions"]), 2)
 
+    def test_anti_burst_blocks_stopped_direction_until_two_neutral_bars_and_return(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(
+                directory, entry_mode="burst", anti_burst_enabled=True, max_open_positions_override=1,
+            )
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(1, 94, 95), inference(1, .9))  # LONG stop loss
+            self.assertEqual(account.snapshot()["trades"][-1]["exit_reason"], "stop_loss")
+            account.process(tick(2, 100, 101), inference(2, .9))
+            self.assertEqual(account.snapshot()["positions"], [])
+            account.process(tick(3, 100, 101), inference(3, .5))
+            account.process(tick(4, 100, 101), inference(4, .5))
+            account.process(tick(5, 100, 101), inference(5, .9))
+            self.assertEqual(len(account.snapshot()["positions"]), 1)
+
+    def test_smart_short_requires_two_consecutive_reversals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, smart_short_enabled=True, entry_mode="burst")
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .1))
+            account.process(tick(1, 100, 101), inference(1, .9))
+            state = account.snapshot()
+            self.assertEqual(len(state["positions"]), 1)
+            self.assertTrue(state["short_protect_mode"])
+            self.assertEqual(state["short_reversal_count"], 1)
+            account.process(tick(2, 100, 101), inference(2, .9))
+            state = account.snapshot()
+            self.assertEqual(state["positions"], [])
+            self.assertEqual(state["trades"][-1]["exit_reason"], "smart short confirmed reversal")
+
+    def test_smart_short_locks_and_trails_without_widening_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, smart_short_enabled=True, entry_mode="burst")
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .1))
+            account.process(tick(1, 100, 101), inference(1, .9))  # first reversal, protect mode
+            account.process(tick(1, 94, 95), inference(1, .9))
+            position = account.snapshot()["positions"][0]
+            self.assertLess(position["stop_loss"], 100)
+            self.assertTrue(any(row["event"] == "SMART_PROTECT" for row in account.snapshot()["events"]))
+
+    def test_runtime_fans_one_inference_out_to_all_strategies(self) -> None:
+        class CountingEngine:
+            def __init__(self): self.calls = 0
+            def predict(self, _bars):
+                self.calls += 1
+                return inference(0, .9)
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = PaperRuntime.__new__(PaperRuntime)
+            runtime._lock, runtime._last_bar, runtime._inference, runtime._inferences = RLock(), None, None, {}
+            runtime.engine, runtime.source_model_label = CountingEngine(), "Test source"
+            runtime.accounts = {
+                label: self.account(directory, entry_mode="burst", strategy_id=strategy_id,
+                                    anti_burst_enabled=anti, smart_short_enabled=smart,
+                                    max_open_positions_override=maximum)
+                for strategy_id, label, anti, smart, maximum in PaperRuntime.STRATEGIES
+            }
+            for account in runtime.accounts.values(): account.start()
+            bars = pd.DataFrame({"timestamp": [12345]})
+            runtime.process(tick(0, 100, 101), bars)
+            self.assertEqual(runtime.engine.calls, 1)
+            self.assertEqual({account.snapshot()["last_signal_id"] for account in runtime.accounts.values()}, {12345})
+
     def test_runtime_exposes_selected_model_inference(self) -> None:
         runtime = PaperRuntime.__new__(PaperRuntime)
         expected = inference(0, .7)
