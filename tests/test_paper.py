@@ -183,6 +183,18 @@ class PaperAccountTests(unittest.TestCase):
             account.process(tick(13, 100, 101), inference(13, .9))
             self.assertEqual(len(account.snapshot()["positions"]), 1)
 
+    def test_strategy_zero_ignores_probability_reversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(
+                directory, strategy_id="0", entry_mode="burst", probability_reversal_enabled=False,
+                stop_loss_price=50, take_profit_price=100,
+            )
+            account.start()
+            account.process(tick(0, 100, 101), inference(0, .9))
+            account.process(tick(1, 100, 101), inference(1, .1))
+            self.assertEqual(len(account.snapshot()["positions"]), 1)
+            self.assertEqual(account.snapshot()["positions"][0]["side"], "LONG")
+
     def test_manual_actions_target_one_leg(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             account = self.account(directory, entry_mode="burst")

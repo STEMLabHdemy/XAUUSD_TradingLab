@@ -52,6 +52,7 @@ class PaperConfig:
     short_reversal_mode: str | None = None
     short_reversal_price_confirm_bars: int = 0
     direction_lock_rearm_bars: int = 2
+    probability_reversal_enabled: bool = True
 
     def validate(self) -> None:
         if self.starting_capital <= 0 or self.position_size_units <= 0 or self.leverage <= 0:
@@ -66,8 +67,8 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
-        if self.strategy_id not in set("ABCDEFGHIJKL"):
-            raise ValueError("Strategy id must be between A and L")
+        if self.strategy_id not in {"0", *set("ABCDEFGHIJKL")}:
+            raise ValueError("Strategy id must be 0 or between A and L")
         if self.max_open_positions_override is not None and self.max_open_positions_override < 1:
             raise ValueError("Maximum open positions override must be positive")
         if self.short_reversal_confirmations < 2:
@@ -551,7 +552,7 @@ class PaperAccount:
                 side = str(positions[0]["side"])
                 exit_long = side == "LONG" and score < self.config.probability_exit_threshold
                 exit_short = side == "SHORT" and score > self.config.probability_exit_threshold
-                if exit_long or exit_short:
+                if (exit_long or exit_short) and self.config.probability_reversal_enabled:
                     short_mode = self.config.short_reversal_mode or (
                         "smart" if self.config.smart_short_enabled else "immediate"
                     )
@@ -681,6 +682,7 @@ class StrategySpec:
     short_reversal_confirmations: int = 2
     short_reversal_price_confirm_bars: int = 0
     direction_lock_rearm_bars: int = 2
+    probability_reversal_enabled: bool = True
     protection_overrides: tuple[tuple[str, float], ...] = ()
 
     def __iter__(self):
@@ -714,6 +716,8 @@ class PaperRuntime:
         )),
         StrategySpec("K", "K · Anti-raffica 2", anti_burst=True, max_open_positions=2),
         StrategySpec("L", "L · Anti-raffica severa", anti_burst=True, max_open_positions=1, direction_lock_rearm_bars=3),
+        # Pure control: no model-driven exit. Only SL, TP or session close can flatten it.
+        StrategySpec("0", "0 · Solo SL/TP", probability_reversal_enabled=False),
     )
 
     def __init__(self, root: Path | str, config: PaperConfig):
@@ -757,10 +761,14 @@ class PaperRuntime:
         for spec in self.STRATEGIES:
             account_key = f"comparison_v1_{key}_{spec.strategy_id.lower()}"
             strategy_config = self._strategy_config(config, spec)
+            is_new_account = not (self.comparison_directory / account_key / "state.json").exists()
             self.accounts[spec.label] = PaperAccount(
                 account_key, spec.label, strategy_config, self.comparison_directory,
             )
             self.accounts[spec.label].set_run_id(self.run_id)
+            if is_new_account and any(account.snapshot().get("running") for account in self.accounts.values()):
+                self.accounts[spec.label].set_run_id(self.run_id, datetime.now(timezone.utc).isoformat())
+                self.accounts[spec.label].start()
         self._last_bar: int | None = None
         self._inference: LiveInference | None = None
         self._inferences: dict[str, LiveInference] = {}
@@ -822,6 +830,7 @@ class PaperRuntime:
             "short_reversal_confirmations": spec.short_reversal_confirmations,
             "short_reversal_price_confirm_bars": spec.short_reversal_price_confirm_bars,
             "direction_lock_rearm_bars": spec.direction_lock_rearm_bars,
+            "probability_reversal_enabled": spec.probability_reversal_enabled,
         }
         values.update(dict(spec.protection_overrides))
         return replace(config, **values)
