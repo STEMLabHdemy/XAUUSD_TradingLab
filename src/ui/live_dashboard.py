@@ -166,17 +166,23 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
             st.metric("Esposizione", f"{totals['exposure']:,.2f} USD", border=True)
             st.metric("Margine usato", f"{totals['used_margin']:,.2f} USD", border=True)
 
-        st.markdown("**PnL per portafoglio**")
-        with st.container(horizontal=True):
-            for strategy, account in runtime.accounts.items():
-                state = account.snapshot()
-                total_pnl = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
-                st.metric(
-                    strategy,
-                    f"{total_pnl:+,.2f} USD",
-                    f"aperto {float(state['unrealized_pnl']):+,.2f} · chiuso {float(state['realized_pnl']):+,.2f}",
-                    border=True,
-                )
+        st.markdown("**Rendimento per strategia**")
+        comparison = runtime.comparison().sort_values("strategy_id")
+        cards = comparison.to_dict("records")
+        for offset in range(0, len(cards), 4):
+            with st.container(horizontal=True):
+                for row in cards[offset:offset + 4]:
+                    with st.container(border=True):
+                        st.metric(
+                            str(row["model"]), f"{float(row['total_pnl']):+,.2f} USD",
+                            f"ultima ora {float(row['pnl_last_hour']):+,.2f} USD" if pd.notna(row["pnl_last_hour"]) else "ultima ora N/D",
+                        )
+                        per_day = row["pnl_per_day"]
+                        st.caption(
+                            f"aperto {float(row['unrealized_pnl']):+,.2f} · chiuso {float(row['realized_pnl']):+,.2f} · "
+                            + (f"media {float(per_day):+,.2f} USD/giorno" if pd.notna(per_day) else "media/giorno N/D (< 1 ora)")
+                        )
+                        st.caption(f"DD {float(row['max_drawdown']):.2%} · trade {int(row['trades'])} · aperte {int(row['open_positions'])}")
 
         positions = _open_positions_frame(runtime, tick, display_timezone)
         st.markdown("**Posizioni aperte adesso**")
@@ -704,9 +710,12 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     st.rerun(scope="fragment")
 
             st.subheader("Registro completo dei trade")
-            st.caption(f"Run ID: {runtime.run_id}. Tutte le posizioni aperte e i trade chiusi, filtrabili per strategia.")
-            ledger = _all_trades_frame(runtime, tick, service.display_timezone)
-            if ledger.empty:
+            st.caption(f"Run ID: {runtime.run_id}. I CSV aggiornati sono in data/live/paper/comparison_v1/exports/{runtime.run_id}.")
+            show_ledger = st.toggle("Carica registro dettagliato nella pagina", value=False, key="paper_show_detailed_ledger")
+            ledger = _all_trades_frame(runtime, tick, service.display_timezone) if show_ledger else pd.DataFrame()
+            if not show_ledger:
+                st.caption("Registro non caricato: usa i CSV per l'analisi; attivalo solo quando vuoi ispezionare trade specifici.")
+            elif ledger.empty:
                 st.caption("Nessun trade aperto o chiuso per ora.")
             else:
                 with st.container(horizontal=True):

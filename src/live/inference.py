@@ -24,6 +24,9 @@ class LiveInference:
     probability_down: float | None = None
     probability_neutral: float | None = None
     signal_id: int | None = None
+    # Set by PaperRuntime from the completed M1 series.  It is deliberately
+    # shared by every ledger, just like the model probabilities.
+    short_reversal_price_confirmed: bool | None = None
 
 
 class LiveInferenceEngine:

@@ -49,6 +49,9 @@ class PaperConfig:
     short_protect_trailing_trigger_pnl: float = 6.0
     short_protect_trailing_distance: float = 2.0
     short_reversal_confirmations: int = 2
+    short_reversal_mode: str | None = None
+    short_reversal_price_confirm_bars: int = 0
+    direction_lock_rearm_bars: int = 2
 
     def validate(self) -> None:
         if self.starting_capital <= 0 or self.position_size_units <= 0 or self.leverage <= 0:
@@ -63,12 +66,16 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
-        if self.strategy_id not in {"A", "B", "C", "D"}:
-            raise ValueError("Strategy id must be A, B, C or D")
+        if self.strategy_id not in set("ABCDEFGHIJKL"):
+            raise ValueError("Strategy id must be between A and L")
         if self.max_open_positions_override is not None and self.max_open_positions_override < 1:
             raise ValueError("Maximum open positions override must be positive")
         if self.short_reversal_confirmations < 2:
             raise ValueError("Smart short requires at least two reversal confirmations")
+        if self.short_reversal_mode not in {None, "immediate", "smart", "disabled"}:
+            raise ValueError("Short reversal mode must be immediate, smart or disabled")
+        if self.short_reversal_price_confirm_bars < 0 or self.direction_lock_rearm_bars < 2:
+            raise ValueError("Confirmation bars must be non-negative; direction lock needs at least two bars")
         if min(
             self.short_protect_break_even_pnl, self.short_protect_lock_trigger_pnl,
             self.short_protect_lock_pnl, self.short_protect_trailing_trigger_pnl,
@@ -122,7 +129,7 @@ class PaperAccount:
             "used_margin": 0.0, "free_margin": self.config.starting_capital,
             "exposure": 0.0, "peak_equity": self.config.starting_capital, "max_drawdown": 0.0,
             "position": None, "positions": [], "trades": [], "events": [], "equity_history": [],
-            "portfolio_history": [], "run_id": None,
+            "portfolio_history": [], "run_id": None, "experiment_started_at": None,
             "pending_direction": None, "persistence_count": 0, "last_exit_time": None,
             "last_entry_time": None,
             "last_processed_bar": None, "last_signal": "NO_TRADE", "last_reason": "paper stopped",
@@ -141,6 +148,7 @@ class PaperAccount:
         state.setdefault("last_entry_time", None)
         state.setdefault("portfolio_history", [])
         state.setdefault("run_id", None)
+        state.setdefault("experiment_started_at", None)
         state.setdefault("last_signal_id", None)
         state.setdefault("short_reversal_count", 0)
         state.setdefault("short_protect_mode", False)
@@ -183,10 +191,12 @@ class PaperAccount:
             self.state["last_reason"] = "configurazione aggiornata; storico e posizioni preservati"
             self._save()
 
-    def set_run_id(self, run_id: str) -> None:
+    def set_run_id(self, run_id: str, started_at: str | None = None) -> None:
         """Attach an experiment identifier without touching positions or ledger."""
         with self._lock:
             self.state["run_id"] = run_id
+            if started_at is not None:
+                self.state["experiment_started_at"] = started_at
             self._save()
 
     def _save(self) -> None:
@@ -383,7 +393,7 @@ class PaperAccount:
                 continue
             if candidate_side != side:
                 gate["non_directional_bars"] = int(gate.get("non_directional_bars", 0)) + 1
-                if gate["non_directional_bars"] >= 2 and not gate.get("rearmed"):
+                if gate["non_directional_bars"] >= self.config.direction_lock_rearm_bars and not gate.get("rearmed"):
                     gate["rearmed"] = True
                     self._record_event("DIRECTION_LOCK_ARMED", tick, side=side, lock_state=gate.copy())
             elif gate.get("rearmed"):
@@ -542,25 +552,46 @@ class PaperAccount:
                 exit_long = side == "LONG" and score < self.config.probability_exit_threshold
                 exit_short = side == "SHORT" and score > self.config.probability_exit_threshold
                 if exit_long or exit_short:
-                    if exit_short and self.config.smart_short_enabled:
-                        reversals = int(self.state.get("short_reversal_count", 0)) + 1
-                        self.state["short_reversal_count"] = reversals
-                        if reversals < self.config.short_reversal_confirmations:
-                            self.state["short_protect_mode"] = True
-                            signal, reason = "HOLD", f"smart short protect mode: reversal {reversals}/{self.config.short_reversal_confirmations}"
-                            self._record_event("SMART_SHORT_REVERSAL", tick, stage="first", action="protect", reversals=reversals)
-                            smart_updates += self._apply_smart_short_protection(tick)
-                        else:
-                            signal, reason = "EXIT", "smart short confirmed reversal"
-                            self._record_event("SMART_SHORT_REVERSAL", tick, stage="second", action="close", reversals=reversals)
-                            closed = self._close_all(tick, reason)
+                    short_mode = self.config.short_reversal_mode or (
+                        "smart" if self.config.smart_short_enabled else "immediate"
+                    )
+                    if exit_short and short_mode == "disabled":
+                        self.state["short_reversal_count"] = 0
+                        self.state["short_protect_mode"] = False
+                        signal, reason = "HOLD", "short probability reversal disabled by strategy"
+                    elif exit_short and short_mode == "smart":
+                        price_confirmed = (
+                            self.config.short_reversal_price_confirm_bars == 0
+                            or bool(inference.short_reversal_price_confirmed)
+                        )
+                        if not price_confirmed:
                             self.state["short_reversal_count"] = 0
                             self.state["short_protect_mode"] = False
-                            self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
-                            self._mark(tick, save=False)
-                            self._record_decision(tick, inference, signal, self.state["last_reason"])
-                            self._save()
-                            return
+                            signal, reason = "HOLD", "smart short reversal rejected: price confirmation missing"
+                            self._record_event(
+                                "SMART_SHORT_REVERSAL", tick, stage="rejected", action="hold",
+                                reason="price_confirmation_missing",
+                                required_bars=self.config.short_reversal_price_confirm_bars,
+                            )
+                        else:
+                            reversals = int(self.state.get("short_reversal_count", 0)) + 1
+                            self.state["short_reversal_count"] = reversals
+                            if reversals < self.config.short_reversal_confirmations:
+                                self.state["short_protect_mode"] = True
+                                signal, reason = "HOLD", f"smart short protect mode: reversal {reversals}/{self.config.short_reversal_confirmations}"
+                                self._record_event("SMART_SHORT_REVERSAL", tick, stage="first", action="protect", reversals=reversals)
+                                smart_updates += self._apply_smart_short_protection(tick)
+                            else:
+                                signal, reason = "EXIT", "smart short confirmed reversal"
+                                self._record_event("SMART_SHORT_REVERSAL", tick, stage="second", action="close", reversals=reversals)
+                                closed = self._close_all(tick, reason)
+                                self.state["short_reversal_count"] = 0
+                                self.state["short_protect_mode"] = False
+                                self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
+                                self._mark(tick, save=False)
+                                self._record_decision(tick, inference, signal, self.state["last_reason"])
+                                self._save()
+                                return
                     else:
                         signal, reason = "EXIT", "probability reversal"
                         closed = self._close_all(tick, reason)
@@ -640,12 +671,49 @@ class PaperAccount:
         return pd.DataFrame(self.snapshot()["events"])
 
 
+@dataclass(frozen=True)
+class StrategySpec:
+    strategy_id: str
+    label: str
+    anti_burst: bool = False
+    max_open_positions: int | None = None
+    short_reversal_mode: str = "immediate"
+    short_reversal_confirmations: int = 2
+    short_reversal_price_confirm_bars: int = 0
+    direction_lock_rearm_bars: int = 2
+    protection_overrides: tuple[tuple[str, float], ...] = ()
+
+    def __iter__(self):
+        """Compatibility with the original five-value A-D test fixture."""
+        yield self.strategy_id
+        yield self.label
+        yield self.anti_burst
+        yield self.short_reversal_mode == "smart"
+        yield self.max_open_positions
+
+
 class PaperRuntime:
+    """One inference stream fanned out to independent, comparable ledgers."""
+
     STRATEGIES = (
-        ("A", "A · Baseline", False, False, None),
-        ("B", "B · Anti-raffica", True, False, 1),
-        ("C", "C · Smart SHORT", False, True, None),
-        ("D", "D · Combinata", True, True, 1),
+        # A-D are frozen controls: their operational rules are unchanged.
+        StrategySpec("A", "A · Baseline"),
+        StrategySpec("B", "B · Anti-raffica", anti_burst=True, max_open_positions=1),
+        StrategySpec("C", "C · Smart SHORT", short_reversal_mode="smart"),
+        StrategySpec("D", "D · Combinata", anti_burst=True, max_open_positions=1, short_reversal_mode="smart"),
+        # New, explicit hypotheses. They all consume the exact same M1 event.
+        StrategySpec("E", "E · Smart SHORT 3", short_reversal_mode="smart", short_reversal_confirmations=3),
+        StrategySpec("F", "F · No reversal SHORT", short_reversal_mode="disabled"),
+        StrategySpec("G", "G · Smart SHORT + prezzo", short_reversal_mode="smart", short_reversal_price_confirm_bars=3),
+        StrategySpec("H", "H · 3 LONG + prezzo", short_reversal_mode="smart", short_reversal_confirmations=3, short_reversal_price_confirm_bars=3),
+        StrategySpec("I", "I · Smart SHORT protetto", short_reversal_mode="smart", protection_overrides=(
+            ("short_protect_break_even_pnl", 0.0), ("short_protect_lock_trigger_pnl", 2.0), ("short_protect_lock_pnl", 0.5),
+        )),
+        StrategySpec("J", "J · Smart SHORT trailing largo", short_reversal_mode="smart", protection_overrides=(
+            ("short_protect_trailing_distance", 4.0),
+        )),
+        StrategySpec("K", "K · Anti-raffica 2", anti_burst=True, max_open_positions=2),
+        StrategySpec("L", "L · Anti-raffica severa", anti_burst=True, max_open_positions=1, direction_lock_rearm_bars=3),
     )
 
     def __init__(self, root: Path | str, config: PaperConfig):
@@ -653,6 +721,7 @@ class PaperRuntime:
         self.comparison_directory = self.root / "data/live/paper/comparison_v1"
         self.run_metadata_path = self.comparison_directory / "run.json"
         self.run_id = self._load_or_create_run()
+        self._run_started_at = self._run_start_timestamp()
         self.signal_log_path = self.comparison_directory / "signals.jsonl"
         manifest = self.root / "models/baseline_manifest_provisional.json"
         definitions: list[tuple[str, Path, Path, str, str]] = [
@@ -682,16 +751,16 @@ class PaperRuntime:
         self.engine = CostAwareLiveInferenceEngine(path, model_manifest) if kind == "cost_aware" else LiveInferenceEngine(
             path, model_manifest, config.buy_threshold, config.sell_threshold,
         )
-        # Exactly one model invocation creates one signal event, fan-out to A/B/C/D.
+        # Exactly one model invocation creates one signal event, fan-out to A-L.
         self.engines = {source_label: self.engine}
         self.accounts: dict[str, PaperAccount] = {}
-        for strategy_id, label, anti_burst, smart_short, maximum in self.STRATEGIES:
-            account_key = f"comparison_v1_{key}_{strategy_id.lower()}"
-            strategy_config = self._strategy_config(config, strategy_id, anti_burst, smart_short, maximum)
-            self.accounts[label] = PaperAccount(
-                account_key, label, strategy_config, self.comparison_directory,
+        for spec in self.STRATEGIES:
+            account_key = f"comparison_v1_{key}_{spec.strategy_id.lower()}"
+            strategy_config = self._strategy_config(config, spec)
+            self.accounts[spec.label] = PaperAccount(
+                account_key, spec.label, strategy_config, self.comparison_directory,
             )
-            self.accounts[label].set_run_id(self.run_id)
+            self.accounts[spec.label].set_run_id(self.run_id)
         self._last_bar: int | None = None
         self._inference: LiveInference | None = None
         self._inferences: dict[str, LiveInference] = {}
@@ -706,12 +775,20 @@ class PaperRuntime:
                     return metadata["run_id"]
             except (OSError, json.JSONDecodeError):
                 pass
-        run_id = f"abcd_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
+        run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
         self.run_metadata_path.write_text(json.dumps({
             "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
-            "experiment": "four_way_paper_comparison", "strategies": [item[0] for item in self.STRATEGIES],
+            "experiment": "strategy_lab_a_to_l", "strategies": [item.strategy_id for item in self.STRATEGIES],
         }, indent=2), encoding="utf-8")
         return run_id
+
+    def _run_start_timestamp(self) -> pd.Timestamp | None:
+        try:
+            metadata = json.loads(self.run_metadata_path.read_text(encoding="utf-8"))
+            value = pd.to_datetime(metadata.get("created_at"), utc=True, errors="coerce")
+            return None if pd.isna(value) else value
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def _record_shared_signal(self, tick: MarketTick, inference: LiveInference) -> None:
         if inference.signal_id is None:
@@ -726,6 +803,7 @@ class PaperRuntime:
             "p_up": inference.probability_up, "p_down": inference.probability_down,
             "p_neutral": inference.probability_neutral, "predicted_class": inference.candidate,
             "model": inference.model, "horizon_minutes": inference.horizon_minutes,
+            "short_reversal_price_confirmed": inference.short_reversal_price_confirmed,
         }
         with self.signal_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -734,26 +812,48 @@ class PaperRuntime:
         self.run_metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
-    def _strategy_config(
-        config: PaperConfig, strategy_id: str, anti_burst: bool, smart_short: bool, maximum: int | None,
-    ) -> PaperConfig:
-        return replace(
-            config, strategy_id=strategy_id, anti_burst_enabled=anti_burst,
-            smart_short_enabled=smart_short, max_open_positions_override=maximum,
-        )
+    def _strategy_config(config: PaperConfig, spec: StrategySpec) -> PaperConfig:
+        values: dict[str, Any] = {
+            "strategy_id": spec.strategy_id,
+            "anti_burst_enabled": spec.anti_burst,
+            "smart_short_enabled": spec.short_reversal_mode == "smart",
+            "max_open_positions_override": spec.max_open_positions,
+            "short_reversal_mode": spec.short_reversal_mode,
+            "short_reversal_confirmations": spec.short_reversal_confirmations,
+            "short_reversal_price_confirm_bars": spec.short_reversal_price_confirm_bars,
+            "direction_lock_rearm_bars": spec.direction_lock_rearm_bars,
+        }
+        values.update(dict(spec.protection_overrides))
+        return replace(config, **values)
 
     def _config_for_account(self, base: PaperConfig, account: PaperAccount) -> PaperConfig:
-        return self._strategy_config(
-            base, account.config.strategy_id, account.config.anti_burst_enabled,
-            account.config.smart_short_enabled, account.config.max_open_positions_override,
-        )
+        spec = next(item for item in self.STRATEGIES if item.strategy_id == account.config.strategy_id)
+        return self._strategy_config(base, spec)
 
     def process(self, tick: MarketTick, completed_m1: pd.DataFrame) -> None:
         with self._lock:
             latest = int(completed_m1.timestamp.iloc[-1]) if not completed_m1.empty else None
+            latest_time = (
+                pd.Timestamp(completed_m1.datetime_utc.iloc[-1])
+                if not completed_m1.empty and "datetime_utc" in completed_m1 else None
+            )
+            # A restarted dashboard can still see the final candle before a
+            # market pause.  Do not inject that old event into a fresh cohort.
+            if (latest_time is not None and self._run_started_at is not None
+                    and latest_time < self._run_started_at):
+                self._last_bar = latest
+                return
             if latest != self._last_bar:
                 inference = self.engine.predict(completed_m1)
-                self._inference = replace(inference, signal_id=latest) if inference.available else inference
+                price_confirmed = False
+                lookback = 3
+                if len(completed_m1) > lookback and "high" in completed_m1:
+                    recent_high = float(completed_m1.high.iloc[-1])
+                    prior_high = float(completed_m1.high.iloc[-(lookback + 1):-1].max())
+                    price_confirmed = recent_high > prior_high
+                self._inference = replace(
+                    inference, signal_id=latest, short_reversal_price_confirmed=price_confirmed,
+                ) if inference.available else inference
                 self._inferences = {name: self._inference for name in self.accounts}
                 self._last_bar = latest
                 if self._inference.available and hasattr(self, "run_metadata_path"):
@@ -761,6 +861,8 @@ class PaperRuntime:
             if self._inference is not None:
                 for account in self.accounts.values():
                     account.process(tick, self._inference)
+                if self._inference.available and hasattr(self, "comparison_directory"):
+                    self.write_strategy_exports()
 
     def signals_frame(self) -> pd.DataFrame:
         if not self.signal_log_path.exists():
@@ -785,12 +887,41 @@ class PaperRuntime:
                 rows.append({"run_id": self.run_id, "strategy": account.model, **snapshot})
         return pd.DataFrame(rows)
 
+    @staticmethod
+    def _performance_metrics(state: dict[str, Any], total_pnl: float) -> dict[str, Any]:
+        """Return comparable speed metrics without pretending short samples are daily evidence."""
+        started = pd.to_datetime(state.get("experiment_started_at"), utc=True, errors="coerce")
+        history = pd.DataFrame(state.get("portfolio_history", []))
+        if started is pd.NaT or pd.isna(started) or history.empty:
+            return {"started_at": state.get("experiment_started_at"), "elapsed_hours": None,
+                    "pnl_per_day": None, "pnl_last_hour": None}
+        history["timestamp"] = pd.to_datetime(history["timestamp"], utc=True, errors="coerce")
+        history = history.dropna(subset=["timestamp"]).sort_values("timestamp")
+        if history.empty:
+            return {"started_at": state.get("experiment_started_at"), "elapsed_hours": None,
+                    "pnl_per_day": None, "pnl_last_hour": None}
+        now = history["timestamp"].iloc[-1]
+        elapsed_hours = max(0.0, (now - started).total_seconds() / 3600)
+        pnl_per_day = total_pnl / (elapsed_hours / 24) if elapsed_hours >= 1 else None
+        one_hour_ago = now - pd.Timedelta(hours=1)
+        prior = history[history["timestamp"] <= one_hour_ago]
+        pnl_last_hour = None
+        if not prior.empty:
+            row = prior.iloc[-1]
+            previous_total = float(row["realized_pnl"]) + float(row["unrealized_pnl"])
+            pnl_last_hour = total_pnl - previous_total
+        return {
+            "started_at": started.isoformat(), "elapsed_hours": elapsed_hours,
+            "pnl_per_day": pnl_per_day, "pnl_last_hour": pnl_last_hour,
+        }
+
     def comparison(self) -> pd.DataFrame:
         rows = []
         for name, account in self.accounts.items():
             state = account.snapshot()
             positions = state.get("positions") or ([state["position"]] if state.get("position") else [])
             total_pnl = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
+            performance = self._performance_metrics(state, total_pnl)
             rows.append({
                 "model": name,
                 "run_id": getattr(self, "run_id", "N/D"),
@@ -811,8 +942,53 @@ class PaperRuntime:
                 "position": f"{len(positions)} {positions[0]['side']}" if positions else "FLAT",
                 "signal": state["last_signal"],
                 "max_drawdown": state["max_drawdown"],
+                **performance,
             })
         return pd.DataFrame(rows)
+
+    def write_strategy_exports(self) -> Path:
+        """Materialize small, analysis-ready CSVs; the dashboard need not render large ledgers."""
+        destination = self.comparison_directory / "exports" / self.run_id
+        destination.mkdir(parents=True, exist_ok=True)
+        for account in self.accounts.values():
+            state = account.snapshot()
+            folder = destination / f"{account.config.strategy_id}_{account.model.split('·', 1)[-1].strip().replace(' ', '_')}"
+            folder.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(state.get("trades", [])).to_csv(folder / "trades.csv", index=False)
+            pd.DataFrame(state.get("positions", [])).to_csv(folder / "open_positions.csv", index=False)
+            pd.DataFrame(state.get("events", [])).to_csv(folder / "events.csv", index=False)
+            pd.DataFrame(state.get("portfolio_history", [])).to_csv(folder / "portfolio_history.csv", index=False)
+            pd.DataFrame([{
+                **self.comparison().set_index("strategy_id").loc[account.config.strategy_id].to_dict(),
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+            }]).to_csv(folder / "summary.csv", index=False)
+        self.signals_frame().to_csv(destination / "signals_m1_shared.csv", index=False)
+        self.comparison().to_csv(destination / "comparison_summary.csv", index=False)
+        return destination
+
+    def reset_experiment(self) -> str:
+        """Start an explicitly new A-L cohort after the caller archived the prior one."""
+        with self._lock:
+            started_at = datetime.now(timezone.utc).isoformat()
+            self.run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
+            self.run_metadata_path.write_text(json.dumps({
+                "run_id": self.run_id, "created_at": started_at,
+                "experiment": "strategy_lab_a_to_l", "strategies": [item.strategy_id for item in self.STRATEGIES],
+                "reset_reason": "user_requested_clean_simultaneous_cohort",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._run_started_at = pd.Timestamp(started_at)
+            self.signal_log_path.write_text("", encoding="utf-8")
+            by_id = {item.strategy_id: item for item in self.STRATEGIES}
+            for account in self.accounts.values():
+                account.config = self._strategy_config(self.config, by_id[account.config.strategy_id])
+                account.state = account._new_state()
+                account.state["run_id"] = self.run_id
+                account.state["experiment_started_at"] = started_at
+                account._save()
+            self._last_bar = None
+            self._inference, self._inferences = None, {}
+            self.write_strategy_exports()
+            return self.run_id
 
     def inference_for(self, model: str) -> LiveInference | None:
         """Return the one shared inference consumed by every strategy."""
