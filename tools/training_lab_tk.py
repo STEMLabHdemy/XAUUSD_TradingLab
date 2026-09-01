@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -48,6 +49,44 @@ def recommendations() -> dict[str, str]:
     return defaults
 
 
+def result_leaderboard() -> pd.DataFrame:
+    """One compact row per audited execution configuration, across all runs."""
+    rows: list[dict[str, object]] = []
+    for audit_path in RESULTS.glob("**/results/strategy_audit.csv"):
+        root = audit_path.parents[1]
+        try:
+            audit = pd.read_csv(audit_path)
+            metrics = pd.read_csv(root / "results/metrics.csv")
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            continue
+        oos = metrics[metrics.evaluation.eq("untouched_oos")].set_index("candidate")
+        for record in audit.to_dict("records"):
+            candidate = str(record.get("model", ""))
+            model_metrics = oos.loc[candidate] if candidate in oos.index else pd.Series(dtype=object)
+            pf = record.get("audit_profit_factor")
+            pnl = record.get("audit_net_pnl")
+            drawdown = record.get("audit_max_drawdown")
+            reliable = bool(record.get("reliability_pass", False))
+            rows.append({
+                "run": root.name, "folder": str(root), "model": candidate,
+                "horizon": manifest.get("horizon_minutes"), "move": manifest.get("minimum_net_move"),
+                "oos_auc": model_metrics.get("macro_roc_auc"),
+                "oos_accuracy": model_metrics.get("balanced_accuracy"),
+                "oos_log_loss": model_metrics.get("log_loss"),
+                "audit_pnl": pnl, "audit_pf": pf, "audit_dd": drawdown,
+                "audit_trades": record.get("audit_trades"), "reliable": reliable,
+                "verdict": "CANDIDATO FORTE" if reliable else "RICERCA",
+            })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    return frame.sort_values(
+        ["reliable", "audit_pf", "audit_pnl", "oos_auc"], ascending=[False, False, False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
 class TrainingLab(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -61,6 +100,8 @@ class TrainingLab(tk.Tk):
         self.move_var = tk.StringVar(value=defaults["move"])
         self.model_vars = {name: tk.BooleanVar(value=name == defaults["models"]) for name in MODELS}
         self.status_var = tk.StringVar(value="Pronto. Nessun modello viene promosso automaticamente.")
+        self.results_var = tk.StringVar(value="Nessun risultato caricato.")
+        self.result_rows = pd.DataFrame()
         self._build()
 
     def _build(self) -> None:
@@ -86,6 +127,58 @@ class TrainingLab(tk.Tk):
         ttk.Label(outer, textvariable=self.status_var, wraplength=760).pack(anchor="w")
         self.log = tk.Text(outer, height=16, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True, pady=(8, 0))
+        self._build_results(outer)
+        self.refresh_results()
+
+    def _build_results(self, outer: ttk.Frame) -> None:
+        results = ttk.LabelFrame(outer, text="Classifica risultati — OOS + audit economico", padding=8)
+        results.pack(fill="both", expand=True, pady=(12, 0))
+        controls = ttk.Frame(results); controls.pack(fill="x")
+        ttk.Button(controls, text="Aggiorna classifica", command=self.refresh_results).pack(side="left")
+        ttk.Button(controls, text="Apri cartella selezionata", command=self.open_result_folder).pack(side="left", padx=8)
+        ttk.Label(controls, textvariable=self.results_var).pack(side="left", padx=8)
+        columns = ("run", "model", "horizon", "move", "oos_auc", "audit_pf", "audit_pnl", "audit_dd", "audit_trades", "verdict")
+        self.tree = ttk.Treeview(results, columns=columns, show="headings", height=9)
+        headings = {
+            "run": "Run", "model": "Modello", "horizon": "H", "move": "Move", "oos_auc": "AUC OOS",
+            "audit_pf": "PF audit", "audit_pnl": "PnL audit", "audit_dd": "DD audit", "audit_trades": "Trade", "verdict": "Verdetto",
+        }
+        widths = {"run": 145, "model": 140, "horizon": 45, "move": 58, "oos_auc": 70, "audit_pf": 75, "audit_pnl": 85, "audit_dd": 75, "audit_trades": 58, "verdict": 125}
+        for column in columns:
+            self.tree.heading(column, text=headings[column]); self.tree.column(column, width=widths[column], anchor="center")
+        self.tree.tag_configure("strong", background="#d9fbe5", foreground="#075c31")
+        self.tree.tag_configure("research", background="#fff5d6", foreground="#725500")
+        scrollbar = ttk.Scrollbar(results, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True, pady=(8, 0)); scrollbar.pack(side="right", fill="y", pady=(8, 0))
+
+    @staticmethod
+    def _format(value: object, decimals: int = 2) -> str:
+        return "N/D" if pd.isna(value) else f"{float(value):.{decimals}f}"
+
+    def refresh_results(self) -> None:
+        self.result_rows = result_leaderboard()
+        self.tree.delete(*self.tree.get_children())
+        if self.result_rows.empty:
+            self.results_var.set("Nessun audit completato: avvia un training.")
+            return
+        strong = int(self.result_rows.reliable.sum())
+        self.results_var.set(f"{len(self.result_rows)} configurazioni · {strong} candidate forti")
+        for index, row in self.result_rows.head(200).iterrows():
+            values = (
+                row["run"], row["model"], row["horizon"], self._format(row["move"]), self._format(row["oos_auc"], 3),
+                self._format(row["audit_pf"], 2), self._format(row["audit_pnl"], 2), self._format(row["audit_dd"], 3),
+                self._format(row["audit_trades"], 0), row["verdict"],
+            )
+            self.tree.insert("", "end", iid=str(index), values=values, tags=("strong" if row["reliable"] else "research",))
+
+    def open_result_folder(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Risultati", "Seleziona una riga della classifica."); return
+        folder = Path(self.result_rows.iloc[int(selected[0])]["folder"])
+        if folder.exists():
+            os.startfile(folder)  # type: ignore[attr-defined]  # Windows-only desktop utility
 
     def append(self, text: str) -> None:
         self.log.configure(state="normal"); self.log.insert("end", text); self.log.see("end"); self.log.configure(state="disabled")
