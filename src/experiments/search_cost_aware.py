@@ -41,6 +41,30 @@ def _finalists(run_root: Path, count: int = 2) -> list[str]:
     return oos.sort_values("selection_score", ascending=False).head(count).candidate.tolist()
 
 
+def audit_fixed_paper_policies(run_root: Path, horizon: int) -> pd.DataFrame:
+    """Audit the fixed live policies only; safe to resume after model fitting."""
+    joined = _load(run_root)
+    finalist_names = _finalists(run_root)
+    selection_end = int(len(joined) * .60)
+    audit_start = min(len(joined), selection_end + 60)
+    audit = joined.iloc[audit_start:]
+    paper_rows: list[pd.DataFrame] = []
+    for number, name in enumerate(finalist_names, start=1):
+        print(f"paper-policy audit model {number}/{len(finalist_names)}: {name}", flush=True)
+        model_frame = audit[[
+            "timestamp", "datetime_utc", "open_bid", "high_bid", "low_bid", "close_bid",
+            "open_ask", "high_ask", "low_ask", "close_ask",
+        ]].copy()
+        model_frame["p_down"] = audit[f"p_down_{name}"]
+        model_frame["p_neutral"] = audit[f"p_neutral_{name}"]
+        model_frame["p_up"] = audit[f"p_up_{name}"]
+        model_frame["horizon"] = horizon
+        paper_rows.append(audit_paper_strategies(model_frame, Path.cwd(), horizon, name))
+    paper_audit = pd.concat(paper_rows, ignore_index=True) if paper_rows else pd.DataFrame()
+    paper_audit.to_csv(run_root / "results/paper_strategy_audit.csv", index=False)
+    return paper_audit
+
+
 def search(run_root: Path, horizon: int, top_audit: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
     joined = _load(run_root)
     finalist_names = _finalists(run_root)
@@ -110,19 +134,7 @@ def search(run_root: Path, horizon: int, top_audit: int = 10) -> tuple[pd.DataFr
     ).reset_index(drop=True)
     development.to_csv(run_root / "results/strategy_development.csv", index=False)
     audited.to_csv(run_root / "results/strategy_audit.csv", index=False)
-    paper_rows: list[pd.DataFrame] = []
-    for name in finalist_names:
-        model_frame = audit[[
-            "timestamp", "datetime_utc", "open_bid", "high_bid", "low_bid", "close_bid",
-            "open_ask", "high_ask", "low_ask", "close_ask",
-        ]].copy()
-        model_frame["p_down"] = audit[f"p_down_{name}"]
-        model_frame["p_neutral"] = audit[f"p_neutral_{name}"]
-        model_frame["p_up"] = audit[f"p_up_{name}"]
-        model_frame["horizon"] = horizon
-        paper_rows.append(audit_paper_strategies(model_frame, Path.cwd(), horizon, name))
-    paper_audit = pd.concat(paper_rows, ignore_index=True) if paper_rows else pd.DataFrame()
-    paper_audit.to_csv(run_root / "results/paper_strategy_audit.csv", index=False)
+    paper_audit = audit_fixed_paper_policies(run_root, horizon)
     (run_root / "results/strategy_summary.json").write_text(json.dumps({
         "horizon": horizon, "finalists": finalist_names,
         "configurations_tested": len(configs), "selection_rows": len(selection),
@@ -136,7 +148,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Audit cost-aware multiclass trading candidates")
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--horizon", type=int, required=True)
+    parser.add_argument("--paper-policies-only", action="store_true",
+                        help="resume only the fixed 0/A-L policy audit; does not refit models")
     args = parser.parse_args()
+    if args.paper_policies_only:
+        audited = audit_fixed_paper_policies(args.run_root.resolve(), args.horizon)
+        print("Paper policy audit")
+        print(audited.to_string(index=False))
+        return 0
     development, audited = search(args.run_root.resolve(), args.horizon)
     print("Top development")
     print(development.head(6).to_string(index=False))

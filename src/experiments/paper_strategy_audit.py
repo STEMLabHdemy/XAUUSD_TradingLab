@@ -19,6 +19,13 @@ class _MemoryAccount(PaperAccount):
     def _save(self) -> None:
         self._sync_position_alias(self.state)
 
+    def _record_event(self, event: str, tick: MarketTick, **values: Any) -> None:
+        """Events are useful live, but are not an audit output or policy input here."""
+
+    def _record_decision(self, tick: MarketTick, inference: LiveInference, signal: str, reason: str) -> None:
+        """Keep the equity curve, without retaining one verbose event per simulated bar."""
+        self._append_portfolio_snapshot(tick)
+
 
 def _inference(row: Any, prior_highs: list[float]) -> LiveInference:
     down, neutral, up = float(row.p_down), float(row.p_neutral), float(row.p_up)
@@ -50,7 +57,7 @@ def audit_paper_strategies(frame: pd.DataFrame, project_root: Path | str, horizo
 
         prior: LiveInference | None = None
         highs: list[float] = []
-        for row in rows.itertuples(index=False):
+        for number, row in enumerate(rows.itertuples(index=False), start=1):
             timestamp = pd.Timestamp(row.datetime_utc)
             spread = float(row.open_ask - row.open_bid)
             # Prior close's signal is actionable at this open: no look-ahead.
@@ -61,7 +68,9 @@ def audit_paper_strategies(frame: pd.DataFrame, project_root: Path | str, horizo
                 # Conservative intrabar order, matching the existing backtester:
                 # a stop gets priority if the same M1 touches both stop and target.
                 for account in accounts.values():
-                    positions = list(account.snapshot().get("positions", []))
+                    # ``snapshot`` deep-copies the complete growing ledger.  Calling it
+                    # on every M1 made an otherwise small audit quadratic in time.
+                    positions = list(account._positions())
                     for position in positions:
                         if position["side"] == "LONG" and position.get("stop_loss") is not None and float(row.low_bid) <= float(position["stop_loss"]):
                             low = MarketTick(timestamp, timestamp, float(row.low_bid), float(row.low_bid) + spread, spread, "XAUUSD")
@@ -77,6 +86,8 @@ def audit_paper_strategies(frame: pd.DataFrame, project_root: Path | str, horizo
                             account.process(low, prior)
             prior = _inference(row, highs)
             highs.append(float(row.high_bid))
+            if number % 1_000 == 0 or number == len(rows):
+                print(f"paper-policy audit {model}: {number}/{len(rows)} M1", flush=True)
 
         output: list[dict[str, object]] = []
         final_tick = MarketTick(timestamp, timestamp, float(row.close_bid), float(row.close_ask), float(row.close_ask - row.close_bid), "XAUUSD")
