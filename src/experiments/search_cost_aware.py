@@ -8,12 +8,14 @@ from pathlib import Path
 import pandas as pd
 
 from src.experiments.search_candidates import CandidateConfig, _evaluate
+from src.experiments.paper_strategy_audit import audit_paper_strategies
 from src.signals import AggregationConfig, SignalAggregator
 
 
 def _load(run_root: Path) -> pd.DataFrame:
     predictions = pd.read_parquet(run_root / "results/oos_predictions.parquet")
-    market_path = Path.cwd() / "data/processed/XAUUSD_M1_MASTER.parquet"
+    manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
+    market_path = Path(manifest.get("data_path", Path.cwd() / "data/processed/XAUUSD_M1_MASTER.parquet"))
     market = pd.read_parquet(
         market_path,
         filters=[
@@ -108,10 +110,23 @@ def search(run_root: Path, horizon: int, top_audit: int = 10) -> tuple[pd.DataFr
     ).reset_index(drop=True)
     development.to_csv(run_root / "results/strategy_development.csv", index=False)
     audited.to_csv(run_root / "results/strategy_audit.csv", index=False)
+    paper_rows: list[pd.DataFrame] = []
+    for name in finalist_names:
+        model_frame = audit[[
+            "timestamp", "datetime_utc", "open_bid", "high_bid", "low_bid", "close_bid",
+            "open_ask", "high_ask", "low_ask", "close_ask",
+        ]].copy()
+        model_frame["p_down"] = audit[f"p_down_{name}"]
+        model_frame["p_neutral"] = audit[f"p_neutral_{name}"]
+        model_frame["p_up"] = audit[f"p_up_{name}"]
+        model_frame["horizon"] = horizon
+        paper_rows.append(audit_paper_strategies(model_frame, Path.cwd(), horizon, name))
+    paper_audit = pd.concat(paper_rows, ignore_index=True) if paper_rows else pd.DataFrame()
+    paper_audit.to_csv(run_root / "results/paper_strategy_audit.csv", index=False)
     (run_root / "results/strategy_summary.json").write_text(json.dumps({
         "horizon": horizon, "finalists": finalist_names,
         "configurations_tested": len(configs), "selection_rows": len(selection),
-        "audit_rows": len(audit),
+        "audit_rows": len(audit), "paper_strategy_rows": len(paper_audit),
         "reliability_passes": int(audited.reliability_pass.sum()),
     }, indent=2), encoding="utf-8")
     return development, audited

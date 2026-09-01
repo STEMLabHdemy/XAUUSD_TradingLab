@@ -55,7 +55,9 @@ def result_leaderboard() -> pd.DataFrame:
     for audit_path in RESULTS.glob("**/results/strategy_audit.csv"):
         root = audit_path.parents[1]
         try:
-            audit = pd.read_csv(audit_path)
+            paper_path = root / "results/paper_strategy_audit.csv"
+            is_paper_audit = paper_path.exists()
+            audit = pd.read_csv(paper_path if is_paper_audit else audit_path)
             metrics = pd.read_csv(root / "results/metrics.csv")
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
@@ -67,9 +69,14 @@ def result_leaderboard() -> pd.DataFrame:
             pf = record.get("audit_profit_factor")
             pnl = record.get("audit_net_pnl")
             drawdown = record.get("audit_max_drawdown")
-            reliable = bool(record.get("reliability_pass", False))
+            reliable = (
+                float(pnl or 0) > 0 and float(pf or 0) > 1 and int(record.get("audit_trades", 0) or 0) >= 30
+                if is_paper_audit else bool(record.get("reliability_pass", False))
+            )
             rows.append({
                 "run": root.name, "folder": str(root), "model": candidate,
+                "strategy": record.get("strategy", "audit semplice"),
+                "strategy_id": record.get("strategy_id", "—"),
                 "horizon": manifest.get("horizon_minutes"), "move": manifest.get("minimum_net_move"),
                 "oos_auc": model_metrics.get("macro_roc_auc"),
                 "oos_accuracy": model_metrics.get("balanced_accuracy"),
@@ -136,13 +143,13 @@ class TrainingLab(tk.Tk):
         ttk.Button(controls, text="Aggiorna classifica", command=self.refresh_results).pack(side="left")
         ttk.Button(controls, text="Apri cartella selezionata", command=self.open_result_folder).pack(side="left", padx=8)
         ttk.Label(controls, textvariable=self.results_var).pack(side="left", padx=8)
-        columns = ("run", "model", "horizon", "move", "oos_auc", "audit_pf", "audit_pnl", "audit_dd", "audit_trades", "verdict")
+        columns = ("run", "model", "strategy", "horizon", "move", "oos_auc", "audit_pf", "audit_pnl", "audit_dd", "audit_trades", "verdict")
         self.tree = ttk.Treeview(results, columns=columns, show="headings", height=26)
         headings = {
-            "run": "Run", "model": "Modello", "horizon": "H", "move": "Move", "oos_auc": "AUC OOS",
+            "run": "Run", "model": "Modello", "strategy": "Strategia", "horizon": "H", "move": "Move", "oos_auc": "AUC OOS",
             "audit_pf": "PF audit", "audit_pnl": "PnL audit", "audit_dd": "DD audit", "audit_trades": "Trade", "verdict": "Verdetto",
         }
-        widths = {"run": 145, "model": 140, "horizon": 45, "move": 58, "oos_auc": 70, "audit_pf": 75, "audit_pnl": 85, "audit_dd": 75, "audit_trades": 58, "verdict": 125}
+        widths = {"run": 135, "model": 120, "strategy": 160, "horizon": 38, "move": 50, "oos_auc": 65, "audit_pf": 70, "audit_pnl": 80, "audit_dd": 70, "audit_trades": 52, "verdict": 115}
         for column in columns:
             self.tree.heading(column, text=headings[column]); self.tree.column(column, width=widths[column], anchor="center")
         self.tree.tag_configure("strong", background="#d9fbe5", foreground="#075c31")
@@ -165,7 +172,7 @@ class TrainingLab(tk.Tk):
         self.results_var.set(f"{len(self.result_rows)} configurazioni · {strong} candidate forti")
         for index, row in self.result_rows.head(200).iterrows():
             values = (
-                row["run"], row["model"], row["horizon"], self._format(row["move"]), self._format(row["oos_auc"], 3),
+                row["run"], row["model"], row["strategy"], row["horizon"], self._format(row["move"]), self._format(row["oos_auc"], 3),
                 self._format(row["audit_pf"], 2), self._format(row["audit_pnl"], 2), self._format(row["audit_dd"], 3),
                 self._format(row["audit_trades"], 0), row["verdict"],
             )
