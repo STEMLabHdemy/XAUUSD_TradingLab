@@ -16,6 +16,15 @@ from src.paper.engine import PaperAccount, PaperConfig, PaperRuntime
 
 class _MemoryAccount(PaperAccount):
     """PaperAccount policy with persistence disabled for a fast, isolated audit."""
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Portfolio history is the audit equity curve.  The separate, live-only
+        # equity history is neither read nor exported by this historical runner.
+        self.state["_skip_equity_history"] = True
+        self._audit_day: str | None = None
+        self._audit_entries = 0
+        self._audit_daily_pnl = 0.0
+
     def _save(self) -> None:
         self._sync_position_alias(self.state)
 
@@ -25,6 +34,27 @@ class _MemoryAccount(PaperAccount):
     def _record_decision(self, tick: MarketTick, inference: LiveInference, signal: str, reason: str) -> None:
         """Keep the equity curve, without retaining one verbose event per simulated bar."""
         self._append_portfolio_snapshot(tick)
+
+    def _sync_audit_day(self, timestamp: pd.Timestamp) -> None:
+        day = timestamp.strftime("%Y-%m-%d")
+        if day != self._audit_day:
+            self._audit_day, self._audit_entries, self._audit_daily_pnl = day, 0, 0.0
+
+    def _today_stats(self, timestamp: pd.Timestamp) -> tuple[int, float]:
+        self._sync_audit_day(timestamp)
+        return self._audit_entries, self._audit_daily_pnl
+
+    def _open(self, side: str, tick: MarketTick, inference: LiveInference, reason: str) -> None:
+        self._sync_audit_day(tick.datetime_utc)
+        super()._open(side, tick, inference, reason)
+        self._audit_entries += 1
+
+    def _close_position(self, position: dict[str, Any], tick: MarketTick, reason: str) -> None:
+        self._sync_audit_day(tick.datetime_utc)
+        before = len(self.state["trades"])
+        super()._close_position(position, tick, reason)
+        if len(self.state["trades"]) > before:
+            self._audit_daily_pnl += float(self.state["trades"][-1]["net_pnl"])
 
 
 def _inference(row: Any, prior_highs: list[float]) -> LiveInference:

@@ -657,8 +657,9 @@ class PaperAccount:
             self.state["last_signal"], self.state["last_reason"] = signal, reason
             self._mark(tick, save=False)
             self._record_decision(tick, inference, signal, reason)
-            self.state["equity_history"].append({"timestamp": tick.datetime_utc.isoformat(), "equity": self.state["equity"], "balance": self.state["balance"]})
-            self.state["equity_history"] = self.state["equity_history"][-10_000:]
+            if not self.state.get("_skip_equity_history", False):
+                self.state["equity_history"].append({"timestamp": tick.datetime_utc.isoformat(), "equity": self.state["equity"], "balance": self.state["balance"]})
+                self.state["equity_history"] = self.state["equity_history"][-10_000:]
             self._save()
 
     def snapshot(self) -> dict[str, Any]:
