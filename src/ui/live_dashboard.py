@@ -348,7 +348,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
             key=f"live_timeframe_{show_paper_controls}", persist_state="session",
         )
         visible = st.segmented_control(
-            "Candele", [100, 250, 500], default=500, required=True,
+            "Candele", [100, 250, 500], default=250, required=True,
             key=f"live_visible_{show_paper_controls}", persist_state="session",
         )
         auto_follow = st.toggle(

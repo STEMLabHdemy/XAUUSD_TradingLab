@@ -1,26 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
-from .pages import (
-    backtest_page, dashboard, data_page, experiments_page, live_paper,
-    models_page, predictions_page, settings_page, trades_page,
-)
+from .live_dashboard import live_market_panel
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:
-    st.set_page_config(page_title="XAUUSD TradingLab", page_icon=":material/query_stats:", layout="wide")
-    pages = {
-        "Dashboard": dashboard,
-        "Live Paper": live_paper,
-        "Backtest": backtest_page,
-        "Experiments": experiments_page,
-        "Models": models_page,
-        "Trades": trades_page,
-        "Predictions": predictions_page,
-        "Data": data_page,
-        "Settings": settings_page,
-    }
-    selected = st.sidebar.radio("Navigation", list(pages))
-    st.sidebar.caption("XAUUSD M1 quantitative research")
-    pages[selected]()
+    st.set_page_config(page_title="XAUUSD Live Paper", page_icon=":material/candlestick_chart:", layout="wide")
+    # This is intentionally the only rendered page.  Research/training tools
+    # remain available from their dedicated scripts, rather than loading their
+    # dataframes, charts and modules into the realtime process.
+    st.title("Live paper")
+    st.caption("Feed reale MT5, capitale virtuale; nessun ordine viene inviato al broker.")
+    live_market_panel(str(ROOT), show_paper_controls=True)
