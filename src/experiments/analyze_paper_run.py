@@ -21,6 +21,9 @@ from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from plotly import graph_objects as go
+from plotly.io import to_html
+from plotly.subplots import make_subplots
 
 
 STARTING_CAPITAL = 100_000.0
@@ -45,10 +48,11 @@ def _read_jsonl(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _run_states(run_dir: Path, run_id: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
+def _run_states(run_dir: Path, run_id: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     score_rows: list[dict[str, Any]] = []
     trades_by_strategy: dict[str, pd.DataFrame] = {}
     history_by_strategy: dict[str, pd.DataFrame] = {}
+    open_by_strategy: dict[str, pd.DataFrame] = {}
     for state_path in run_dir.glob("comparison_v1_*_*/state.json"):
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -75,6 +79,14 @@ def _run_states(run_dir: Path, run_id: str) -> tuple[pd.DataFrame, dict[str, pd.
                     history[field] = pd.to_numeric(history[field], errors="coerce")
         trades_by_strategy[strategy_id] = trades
         history_by_strategy[strategy_id] = history
+        positions = pd.DataFrame(state.get("positions", []))
+        if not positions.empty:
+            positions = positions[positions.run_id.eq(run_id)].copy() if "run_id" in positions else positions.copy()
+            positions["entry_datetime"] = _timestamp(positions.entry_time)
+            positions["exit_datetime"] = pd.NaT
+            positions["exit_reason"] = "OPEN"
+            positions["net_pnl"] = np.nan
+        open_by_strategy[strategy_id] = positions
         realized, unrealized = float(state.get("realized_pnl", 0.0)), float(state.get("unrealized_pnl", 0.0))
         closed = trades.net_pnl.dropna() if not trades.empty else pd.Series(dtype=float)
         gains, losses = closed[closed > 0].sum(), abs(closed[closed < 0].sum())
@@ -104,7 +116,7 @@ def _run_states(run_dir: Path, run_id: str) -> tuple[pd.DataFrame, dict[str, pd.
             "entry_mode": config.get("entry_mode"),
             "position_limit": config.get("max_open_positions"),
         })
-    return pd.DataFrame(score_rows).sort_values("strategy_id"), trades_by_strategy, history_by_strategy
+    return pd.DataFrame(score_rows).sort_values("strategy_id"), trades_by_strategy, history_by_strategy, open_by_strategy
 
 
 def _market_data(project_root: Path) -> pd.DataFrame:
@@ -114,12 +126,30 @@ def _market_data(project_root: Path) -> pd.DataFrame:
     return market.sort_values("datetime_utc").drop_duplicates("datetime_utc", keep="last")
 
 
+def _market_features(market: pd.DataFrame) -> pd.DataFrame:
+    """Only backward-looking context available when the signal was created."""
+    frame = market.copy().sort_values("datetime_utc")
+    frame["mid_close"] = (frame.close_bid + frame.close_ask) / 2
+    for minutes in (5, 15, 30, 60):
+        frame[f"return_{minutes}m_pct"] = frame.mid_close.pct_change(minutes) * 100
+    frame["range_5m"] = frame.mid_close.rolling(5).max() - frame.mid_close.rolling(5).min()
+    frame["range_15m"] = frame.mid_close.rolling(15).max() - frame.mid_close.rolling(15).min()
+    frame["hour_utc"] = frame.datetime_utc.dt.hour
+    return frame
+
+
 def _signal_quality(signals: pd.DataFrame, market: pd.DataFrame, minimum_move: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     if signals.empty:
         return pd.DataFrame(), pd.DataFrame()
     signals = signals.copy()
     signals["signal_datetime"] = _timestamp(signals.timestamp)
     signals["horizon_minutes"] = pd.to_numeric(signals.horizon_minutes, errors="coerce").fillna(15).astype(int)
+    # Cost-aware live output keeps DOWN and NEUTRAL explicitly.  Its ``p_up``
+    # is an execution score (0.4/0.5/0.6), therefore reconstruct the actual
+    # UP probability rather than accidentally optimising that score.
+    signals["p_up_raw"] = (1 - pd.to_numeric(signals.p_down, errors="coerce") - pd.to_numeric(signals.p_neutral, errors="coerce")).clip(0, 1)
+    context = market[["datetime_utc", "return_5m_pct", "return_15m_pct", "return_30m_pct", "return_60m_pct", "range_5m", "range_15m", "hour_utc"]]
+    signals = signals.merge(context, left_on="signal_datetime", right_on="datetime_utc", how="left").drop(columns="datetime_utc")
     # A signal is generated on a completed M1 and tradable at its captured BID/ASK.
     future = market[["datetime_utc", "close_bid", "close_ask"]].copy()
     future = future.rename(columns={"datetime_utc": "future_datetime", "close_bid": "future_bid", "close_ask": "future_ask"})
@@ -138,7 +168,6 @@ def _signal_quality(signals: pd.DataFrame, market: pd.DataFrame, minimum_move: f
         [frame.long_net_15m >= minimum_move, frame.short_net_15m >= minimum_move], ["BUY", "SELL"], default="HOLD"
     )
     frame["direction_correct"] = frame.predicted_class.eq(frame.actual_direction_15m)
-    frame["hour_utc"] = frame.signal_datetime.dt.hour
     quality = frame.dropna(subset=["future_bid", "future_ask"]).copy()
     scorecard = quality.groupby("predicted_class", dropna=False).agg(
         signals=("signal_id", "count"),
@@ -148,6 +177,124 @@ def _signal_quality(signals: pd.DataFrame, market: pd.DataFrame, minimum_move: f
         average_theoretical_pnl=("predicted_net_15m", "mean"),
     ).reset_index()
     return quality, scorecard
+
+
+def _probability_bins(signal_detail: pd.DataFrame, attribution: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    labels = ["<30%", "30-35%", "35-40%", "40-45%", "45-50%", "50-60%", "≥60%"]
+    edges = [0, .30, .35, .40, .45, .50, .60, 1.000001]
+    if signal_detail.empty:
+        signal_bins = pd.DataFrame()
+    else:
+        signals = signal_detail[signal_detail.predicted_class.isin(["BUY", "SELL"])].copy()
+        signals["directional_probability"] = np.where(signals.predicted_class.eq("BUY"), signals.p_up_raw, signals.p_down)
+        signals["probability_band"] = pd.cut(signals.directional_probability, edges, labels=labels, right=False)
+        signal_bins = signals.groupby(["predicted_class", "probability_band"], observed=False).agg(
+            signals=("signal_id", "count"), theoretical_pnl_15m=("predicted_net_15m", "sum"),
+            average_pnl_15m=("predicted_net_15m", "mean"), win_rate_pct=("predicted_net_15m", lambda x: float((x > 0).mean() * 100)),
+        ).reset_index()
+    if attribution.empty:
+        return signal_bins, pd.DataFrame()
+    trades = attribution.copy()
+    trades["probability_band"] = pd.cut(trades.directional_probability, edges, labels=labels, right=False)
+    trade_bins = trades.groupby(["strategy_id", "side", "probability_band"], observed=False).agg(
+        trades=("trade_id", "count"), net_pnl=("net_pnl", "sum"), expectancy=("net_pnl", "mean"),
+        win_rate_pct=("net_pnl", lambda x: float((x > 0).mean() * 100)),
+    ).reset_index()
+    return signal_bins, trade_bins
+
+
+def _trade_attribution(trades_by_strategy: dict[str, pd.DataFrame], open_by_strategy: dict[str, pd.DataFrame], signals: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
+    parts: list[pd.DataFrame] = []
+    if signals.empty:
+        return pd.DataFrame()
+    signal_frame = signals.copy()
+    signal_frame["signal_datetime"] = _timestamp(signal_frame.timestamp)
+    signal_frame["p_up_raw"] = (1 - pd.to_numeric(signal_frame.p_down, errors="coerce") - pd.to_numeric(signal_frame.p_neutral, errors="coerce")).clip(0, 1)
+    context = market[["datetime_utc", "return_5m_pct", "return_15m_pct", "return_30m_pct", "return_60m_pct", "range_5m", "range_15m", "hour_utc"]]
+    signal_frame = signal_frame.merge(context, left_on="signal_datetime", right_on="datetime_utc", how="left").drop(columns="datetime_utc")
+    keep = ["signal_id", "signal_datetime", "predicted_class", "p_down", "p_neutral", "p_up_raw", "spread",
+            "return_5m_pct", "return_15m_pct", "return_30m_pct", "return_60m_pct", "range_5m", "range_15m", "hour_utc"]
+    signal_frame = signal_frame[[column for column in keep if column in signal_frame]].drop_duplicates("signal_id", keep="last")
+    for strategy_id, trades in trades_by_strategy.items():
+        positions = open_by_strategy.get(strategy_id, pd.DataFrame())
+        if trades.empty and positions.empty:
+            continue
+        frame = pd.concat([trades.copy(), positions.copy()], ignore_index=True, sort=False)
+        frame["strategy_id"] = strategy_id
+        frame["entry_datetime"] = _timestamp(frame["entry_datetime"])
+        frame["exit_datetime"] = _timestamp(frame["exit_datetime"])
+        frame["trade_status"] = np.where(frame.exit_datetime.notna(), "CLOSED", "OPEN")
+        frame["holding_minutes"] = (frame.exit_datetime.fillna(pd.Timestamp.now(tz="UTC")) - frame.entry_datetime).dt.total_seconds().div(60).clip(lower=0)
+        frame = frame.merge(signal_frame, on="signal_id", how="left")
+        frame["directional_probability"] = np.where(frame.side.eq("LONG"), frame.p_up_raw, frame.p_down)
+        frame["entry_hour_utc"] = frame.entry_datetime.dt.hour
+        parts.append(frame)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def _run_candles(market: pd.DataFrame, signals: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if signals.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    start = _timestamp(signals.timestamp).min().floor("min")
+    end = _timestamp(signals.timestamp).max().ceil("min") + pd.Timedelta(minutes=1)
+    m1 = market[(market.datetime_utc >= start) & (market.datetime_utc <= end)].copy()
+    if m1.empty:
+        return m1, pd.DataFrame()
+    m5 = m1.set_index("datetime_utc").resample("5min").agg(
+        open_bid=("open_bid", "first"), high_bid=("high_bid", "max"), low_bid=("low_bid", "min"), close_bid=("close_bid", "last"),
+        open_ask=("open_ask", "first"), high_ask=("high_ask", "max"), low_ask=("low_ask", "min"), close_ask=("close_ask", "last"),
+        tick_volume=("tick_volume", "sum"),
+    ).dropna().reset_index()
+    return m1, m5
+
+
+def _write_trade_charts(output: Path, m1: pd.DataFrame, m5: pd.DataFrame, attribution: pd.DataFrame) -> None:
+    """Write one zoomable HTML page per ledger, with M5 overview and M1 detail."""
+    chart_folder = output / "trade_charts"
+    chart_folder.mkdir(exist_ok=True)
+
+    def figure(candles: pd.DataFrame, trades: pd.DataFrame, title: str) -> go.Figure:
+        view = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[.78, .22], vertical_spacing=.03)
+        view.add_trace(go.Candlestick(
+            x=candles.datetime_utc, open=candles.open_bid, high=candles.high_bid, low=candles.low_bid, close=candles.close_bid,
+            name="XAUUSD", increasing_line_color="#25b987", decreasing_line_color="#e45b6a",
+        ), row=1, col=1)
+        if "tick_volume" in candles:
+            colours = np.where(candles.close_bid >= candles.open_bid, "#2f9e87", "#b95869")
+            view.add_trace(go.Bar(x=candles.datetime_utc, y=candles.tick_volume, marker_color=colours, name="Tick volume", opacity=.55), row=2, col=1)
+        if not trades.empty:
+            for side, colour, symbol in (("LONG", "#25b987", "triangle-up"), ("SHORT", "#e45b6a", "triangle-down")):
+                subset = trades[trades.side.eq(side)]
+                if subset.empty:
+                    continue
+                text = [f"Trade #{row.trade_id}<br>{side} entry {row.entry_price:.2f}<br>PnL chiuso {row.net_pnl:+.2f} USD<br>P={row.directional_probability:.1%}" for row in subset.itertuples()]
+                view.add_trace(go.Scatter(x=subset.entry_datetime, y=subset.entry_price, mode="markers", name=f"{side} entry",
+                                          marker=dict(symbol=symbol, size=11, color=colour, line=dict(color="#ffffff", width=1)), text=text, hovertemplate="%{text}<extra></extra>"), row=1, col=1)
+            closed = trades[trades.trade_status.eq("CLOSED")]
+            exit_colours = np.where(closed.net_pnl >= 0, "#25b987", "#e45b6a")
+            exit_text = [f"Trade #{row.trade_id}<br>EXIT {row.exit_price:.2f}<br>PnL {row.net_pnl:+.2f} USD<br>{row.exit_reason}" for row in closed.itertuples()]
+            view.add_trace(go.Scatter(x=closed.exit_datetime, y=closed.exit_price, mode="markers", name="EXIT",
+                                      marker=dict(symbol="x", size=11, color=exit_colours, line=dict(width=2)), text=exit_text, hovertemplate="%{text}<extra></extra>"), row=1, col=1)
+        view.update_layout(template="plotly_dark", title=title, height=760, hovermode="closest", xaxis_rangeslider_visible=False,
+                           legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+        view.update_yaxes(title_text="Prezzo", row=1, col=1)
+        view.update_yaxes(title_text="Volume", row=2, col=1)
+        return view
+
+    links: list[str] = []
+    for strategy_id, trades in attribution.groupby("strategy_id", sort=True) if not attribution.empty else []:
+        title = f"Strategia {strategy_id} — M5 overview e M1 dettaglio"
+        page = "<h1 style='font-family:Arial'>" + title + "</h1>"
+        page += "<p style='font-family:Arial'>Zoom: rotella / selezione. Hover su marker per trade, PnL, probabilità e motivo di uscita.</p>"
+        page += "<h2 style='font-family:Arial'>M5 — panoramica</h2>" + to_html(figure(m5, trades, title + " (M5)"), include_plotlyjs="cdn", full_html=False)
+        page += "<h2 style='font-family:Arial'>M1 — dettaglio</h2>" + to_html(figure(m1, trades, title + " (M1)"), include_plotlyjs=False, full_html=False)
+        filename = f"strategy_{strategy_id}.html"
+        (chart_folder / filename).write_text("<html><body style='background:#0e1626;color:#edf2f7;padding:20px'>" + page + "</body></html>", encoding="utf-8")
+        links.append(f"<li><a href='{filename}' style='color:#64d8ff'>Strategia {strategy_id}</a></li>")
+    (chart_folder / "index.html").write_text(
+        "<html><body style='background:#0e1626;color:#edf2f7;font-family:Arial;padding:30px'><h1>Trade charts</h1><p>Grafici interattivi generati da uno snapshot read-only.</p><ul>" + "".join(links) + "</ul></body></html>",
+        encoding="utf-8",
+    )
 
 
 def _long_short_hourly(trades_by_strategy: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -324,11 +471,14 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
     run_id = str(metadata["run_id"])
     output = output_root or project_root / "results/paper_analysis" / run_id / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output.mkdir(parents=True, exist_ok=True)
-    scorecard, trades, history = _run_states(run_dir, run_id)
-    market, signals = _market_data(project_root), _read_jsonl(run_dir / "signals.jsonl")
+    scorecard, trades, history, open_positions = _run_states(run_dir, run_id)
+    market, signals = _market_features(_market_data(project_root)), _read_jsonl(run_dir / "signals.jsonl")
     if not signals.empty and "run_id" in signals:
         signals = signals[signals.run_id.eq(run_id)].copy()
     signal_detail, signal_scorecard = _signal_quality(signals, market, minimum_move)
+    attribution = _trade_attribution(trades, open_positions, signals, market)
+    signal_bins, trade_bins = _probability_bins(signal_detail, attribution)
+    candles_m1, candles_m5 = _run_candles(market, signals)
     long_short, hourly = _long_short_hourly(trades)
     hourly_chart = (hourly.pivot(index="exit_hour_utc", columns="strategy_id", values="net_pnl").fillna(0).reset_index()
                     if not hourly.empty else pd.DataFrame())
@@ -338,6 +488,8 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
     tables = {
         "Strategy scorecard": scorecard, "Model quality 15m": signal_scorecard,
         "Signal detail 15m": signal_detail, "Long short": long_short, "Hourly": hourly, "Hourly chart": hourly_chart,
+        "Probability signal bins": signal_bins, "Probability trade bins": trade_bins,
+        "Trade attribution": attribution, "Candles M1": candles_m1, "Candles M5": candles_m5,
         "Reversal summary": reversal_summary, "Reversal detail": reversal_detail,
         "Shock windows": shocks, "Shock impact": shock_impact, "Correlation": correlation,
     }
@@ -350,6 +502,7 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
         "market_m1_last_bar": str(market.datetime_utc.max()),
         "signals_analysed": str(len(signal_detail)), "strategies_analysed": str(len(scorecard)),
         "signal_quality_minimum_executable_move": str(minimum_move),
+        "probability_note": "p_up_raw = 1 - p_down - p_neutral; the logged p_up field is only the operational 0.4/0.5/0.6 score.",
         "reversal_note": "TP/SL order within one M1 is treated conservatively as stop-first.",
     }
     (output / "analysis_metadata.json").write_text(json.dumps(metadata_out, indent=2), encoding="utf-8")
@@ -365,6 +518,7 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
         encoding="utf-8",
     )
     _write_excel(output, tables, metadata_out)
+    _write_trade_charts(output, candles_m1, candles_m5, attribution)
     return output
 
 
