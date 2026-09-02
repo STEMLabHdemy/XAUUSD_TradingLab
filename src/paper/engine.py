@@ -417,32 +417,41 @@ class PaperAccount:
     def _side_is_blocked(self, side: str) -> bool:
         return bool(self.config.anti_burst_enabled and self.state["reentry_gates"].get(side, {}).get("blocked"))
 
+    def _exit_policy_value(self, position: dict[str, Any], field: str) -> Any:
+        """Use an O trade's frozen source policy, otherwise this account's config."""
+        policy = position.get("exit_policy")
+        if isinstance(policy, dict) and field in policy:
+            return policy[field]
+        return getattr(self.config, field)
+
     def _apply_smart_short_protection(self, tick: MarketTick) -> int:
         """Tighten only SHORT stops after the first protected reversal; never widen a stop."""
-        if not (self.config.smart_short_enabled and self.state.get("short_protect_mode")):
+        if not self.state.get("short_protect_mode"):
             return 0
         changed = 0
         for position in self._positions():
             if position["side"] != "SHORT":
                 continue
+            if not bool(self._exit_policy_value(position, "smart_short_enabled")):
+                continue
             pnl = self._position_unrealized_pnl(position, tick)
-            if pnl < self.config.short_protect_break_even_pnl:
+            if pnl < float(self._exit_policy_value(position, "short_protect_break_even_pnl")):
                 continue
             quantity = float(position["quantity"])
             total_costs = float(position["entry_costs"]) + (
                 self.config.slippage_price_per_side + self.config.commission_per_unit_per_side
             ) * quantity
             protected_pnl = 0.0
-            if pnl >= self.config.short_protect_lock_trigger_pnl:
-                protected_pnl = self.config.short_protect_lock_pnl
+            if pnl >= float(self._exit_policy_value(position, "short_protect_lock_trigger_pnl")):
+                protected_pnl = float(self._exit_policy_value(position, "short_protect_lock_pnl"))
             desired_stop = float(position["raw_entry_price"]) - (protected_pnl + total_costs) / quantity
-            if pnl >= self.config.short_protect_trailing_trigger_pnl:
-                desired_stop = min(desired_stop, tick.ask + self.config.short_protect_trailing_distance)
+            if pnl >= float(self._exit_policy_value(position, "short_protect_trailing_trigger_pnl")):
+                desired_stop = min(desired_stop, tick.ask + float(self._exit_policy_value(position, "short_protect_trailing_distance")))
             old_stop = position.get("stop_loss")
             if old_stop is None or desired_stop < float(old_stop):
                 position["stop_loss"] = desired_stop
                 protection = "break_even" if protected_pnl == 0 else "lock"
-                if pnl >= self.config.short_protect_trailing_trigger_pnl:
+                if pnl >= float(self._exit_policy_value(position, "short_protect_trailing_trigger_pnl")):
                     protection = "trailing"
                 self._record_event(
                     "SMART_PROTECT", tick, trade_id=position["trade_id"], side="SHORT", price=tick.ask,
@@ -455,15 +464,19 @@ class PaperAccount:
     def _open(
         self, side: str, tick: MarketTick, inference: LiveInference, reason: str,
         market_context: dict[str, float | None] | None = None, allocation_weight: float = 1.0,
+        source_exit_policy: dict[str, Any] | None = None,
     ) -> None:
         quantity = self.config.position_size_units * allocation_weight
         slip = self.config.slippage_price_per_side
         raw = tick.ask if side == "LONG" else tick.bid
         price = raw + slip if side == "LONG" else raw - slip
-        stop = price - self.config.stop_loss_price if side == "LONG" and self.config.stop_loss_price else None
-        stop = price + self.config.stop_loss_price if side == "SHORT" and self.config.stop_loss_price else stop
-        take = price + self.config.take_profit_price if side == "LONG" and self.config.take_profit_price else None
-        take = price - self.config.take_profit_price if side == "SHORT" and self.config.take_profit_price else take
+        policy = source_exit_policy or {}
+        stop_distance = policy.get("stop_loss_price", self.config.stop_loss_price)
+        take_distance = policy.get("take_profit_price", self.config.take_profit_price)
+        stop = price - stop_distance if side == "LONG" and stop_distance else None
+        stop = price + stop_distance if side == "SHORT" and stop_distance else stop
+        take = price + take_distance if side == "LONG" and take_distance else None
+        take = price - take_distance if side == "SHORT" and take_distance else take
         trade_id = int(self.state["next_trade_id"])
         self.state["next_trade_id"] = trade_id + 1
         position = {
@@ -475,6 +488,8 @@ class PaperAccount:
             "regime": "not_available", "expected_return": None, "reason": reason,
             "signal_id": inference.signal_id,
             "allocation_weight": allocation_weight,
+            "source_strategy_id": policy.get("strategy_id"),
+            "exit_policy": policy or None,
             "entry_prior_return_15m_pct": (market_context or {}).get("prior_return_15m_pct"),
             "entry_range_15m_pct": (market_context or {}).get("range_15m_pct"),
         }
@@ -505,6 +520,7 @@ class PaperAccount:
             "entry_prior_return_15m_pct": position.get("entry_prior_return_15m_pct"),
             "entry_range_15m_pct": position.get("entry_range_15m_pct"),
             "allocation_weight": position.get("allocation_weight", 1.0),
+            "source_strategy_id": position.get("source_strategy_id"),
         }
         self.state["trades"].append(row)
         self.state["events"].append({**row, "event": "EXIT", "timestamp": row["exit_time"], "price": exit_price})
@@ -529,6 +545,7 @@ class PaperAccount:
         market_context: dict[str, float | None] | None = None,
         entry_blocker: str | None = None, entry_size_multiplier: float = 1.0,
         allocation_metadata: dict[str, Any] | None = None,
+        source_exit_policy: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             self._mark(tick, save=False)
@@ -577,12 +594,14 @@ class PaperAccount:
             candidate = "BUY" if score >= self.config.buy_threshold else "SELL" if score <= self.config.sell_threshold else None
             self._update_reentry_gates(tick, candidate)
             if positions:
-                side = str(positions[0]["side"])
-                exit_long = side == "LONG" and score < self.config.probability_exit_threshold
-                exit_short = side == "SHORT" and score > self.config.probability_exit_threshold
-                if (exit_long or exit_short) and self.config.probability_reversal_enabled:
-                    short_mode = self.config.short_reversal_mode or (
-                        "smart" if self.config.smart_short_enabled else "immediate"
+                managed_position = positions[0]
+                side = str(managed_position["side"])
+                exit_threshold = float(self._exit_policy_value(managed_position, "probability_exit_threshold"))
+                exit_long = side == "LONG" and score < exit_threshold
+                exit_short = side == "SHORT" and score > exit_threshold
+                if (exit_long or exit_short) and bool(self._exit_policy_value(managed_position, "probability_reversal_enabled")):
+                    short_mode = self._exit_policy_value(managed_position, "short_reversal_mode") or (
+                        "smart" if self._exit_policy_value(managed_position, "smart_short_enabled") else "immediate"
                     )
                     if exit_short and short_mode == "disabled":
                         self.state["short_reversal_count"] = 0
@@ -590,7 +609,7 @@ class PaperAccount:
                         signal, reason = "HOLD", "short probability reversal disabled by strategy"
                     elif exit_short and short_mode == "smart":
                         price_confirmed = (
-                            self.config.short_reversal_price_confirm_bars == 0
+                            int(self._exit_policy_value(managed_position, "short_reversal_price_confirm_bars")) == 0
                             or bool(inference.short_reversal_price_confirmed)
                         )
                         if not price_confirmed:
@@ -600,14 +619,15 @@ class PaperAccount:
                             self._record_event(
                                 "SMART_SHORT_REVERSAL", tick, stage="rejected", action="hold",
                                 reason="price_confirmation_missing",
-                                required_bars=self.config.short_reversal_price_confirm_bars,
+                                required_bars=int(self._exit_policy_value(managed_position, "short_reversal_price_confirm_bars")),
                             )
                         else:
                             reversals = int(self.state.get("short_reversal_count", 0)) + 1
                             self.state["short_reversal_count"] = reversals
-                            if reversals < self.config.short_reversal_confirmations:
+                            confirmations_required = int(self._exit_policy_value(managed_position, "short_reversal_confirmations"))
+                            if reversals < confirmations_required:
                                 self.state["short_protect_mode"] = True
-                                signal, reason = "HOLD", f"smart short protect mode: reversal {reversals}/{self.config.short_reversal_confirmations}"
+                                signal, reason = "HOLD", f"smart short protect mode: reversal {reversals}/{confirmations_required}"
                                 self._record_event("SMART_SHORT_REVERSAL", tick, stage="first", action="protect", reversals=reversals)
                                 smart_updates += self._apply_smart_short_protection(tick)
                             else:
@@ -668,7 +688,8 @@ class PaperAccount:
                     blockers.append("opposite position already open")
                 risk_amount = float(self.state["equity"]) * self.config.risk_per_trade_pct / 100
                 entry_units = self.config.position_size_units * entry_size_multiplier
-                if self.config.stop_loss_price and self.config.stop_loss_price * entry_units > risk_amount:
+                entry_stop_distance = (source_exit_policy or {}).get("stop_loss_price", self.config.stop_loss_price)
+                if entry_stop_distance and float(entry_stop_distance) * entry_units > risk_amount:
                     blockers.append("risk per trade limit")
                 required_margin = tick.ask * entry_units / self.config.leverage
                 if required_margin > float(self.state["free_margin"]): blockers.append("insufficient virtual margin")
@@ -686,7 +707,10 @@ class PaperAccount:
                     if self.state["persistence_count"] >= confirmations:
                         signal = candidate
                         reason = f"{self.config.entry_mode}: threshold and {confirmations} confirmation(s) passed"
-                        self._open(candidate_side, tick, inference, reason, market_context, entry_size_multiplier)
+                        self._open(
+                            candidate_side, tick, inference, reason, market_context, entry_size_multiplier,
+                            source_exit_policy,
+                        )
                         self.state["pending_direction"], self.state["persistence_count"] = None, 0
                     else:
                         reason = f"confirmation {self.state['persistence_count']}/{confirmations}"
@@ -968,12 +992,25 @@ class PaperRuntime:
                         entry_blocker=allocation["entry_blocker"],
                         entry_size_multiplier=allocation["weight"],
                         allocation_metadata=allocation["metadata"],
+                        source_exit_policy=self._exit_policy_snapshot(source.config) if source is not None else None,
                     )
                 if self._inference.available and hasattr(self, "comparison_directory"):
                     # Export after a completed-M1 decision, not on every tick.
                     # Rewriting all CSVs on every UI refresh was avoidable disk IO.
                     if new_bar:
                         self.write_strategy_exports()
+
+    @staticmethod
+    def _exit_policy_snapshot(config: PaperConfig) -> dict[str, Any]:
+        """Freeze exactly the exit rules of O's chosen source inside the trade."""
+        fields = (
+            "strategy_id", "stop_loss_price", "take_profit_price", "probability_exit_threshold",
+            "probability_reversal_enabled", "short_reversal_mode", "smart_short_enabled",
+            "short_reversal_confirmations", "short_reversal_price_confirm_bars",
+            "short_protect_break_even_pnl", "short_protect_lock_trigger_pnl", "short_protect_lock_pnl",
+            "short_protect_trailing_trigger_pnl", "short_protect_trailing_distance",
+        )
+        return {field: getattr(config, field) for field in fields}
 
     @staticmethod
     def _m15_market_context(completed_m1: pd.DataFrame) -> dict[str, float | None]:

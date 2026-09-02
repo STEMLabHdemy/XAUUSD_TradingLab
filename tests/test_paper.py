@@ -119,6 +119,19 @@ class PaperAccountTests(unittest.TestCase):
             self.assertGreater(allocation["metadata"]["meta_score"], 0.0)
             self.assertGreaterEqual(allocation["weight"], 1.0)
 
+    def test_meta_trade_keeps_selected_source_exit_policy_until_close(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, strategy_id="O")
+            account.start()
+            source_policy = PaperRuntime._exit_policy_snapshot(
+                PaperConfig(strategy_id="0", probability_reversal_enabled=False, persistence=1, cooldown_minutes=0)
+            )
+            account.process(tick(0, 100, 101), inference(0, .1), source_exit_policy=source_policy)
+            position = account.snapshot()["position"]
+            self.assertEqual(position["source_strategy_id"], "0")
+            account.process(tick(1, 100, 101), inference(1, .9), source_exit_policy=source_policy)
+            self.assertIsNotNone(account.snapshot()["position"])
+
     def test_mark_to_market_margin_and_stop_loss(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             account = self.account(directory, leverage=10)

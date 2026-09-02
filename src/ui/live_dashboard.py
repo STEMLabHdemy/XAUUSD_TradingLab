@@ -72,7 +72,7 @@ def _open_positions_frame(
             leg_pnl = _position_pnl(account, position, tick)
             notional = mark_price * quantity
             rows.append({
-                "Modello": model, "Trade": int(position["trade_id"]),
+                "Modello": model, "Fonte O": position.get("source_strategy_id") or "—", "Trade": int(position["trade_id"]),
                 "Direzione": f"▲ {side}" if side == "LONG" else f"▼ {side}",
                 "Aperta alle": entry_time.tz_convert(display_timezone).strftime("%d/%m %H:%M:%S"),
                 "Durata": f"{held_minutes // 60}h {held_minutes % 60:02d}m" if held_minutes >= 60 else f"{held_minutes} min",
@@ -149,7 +149,7 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
             quantity = float(position["quantity"])
             rows.append({
                 "Run ID": state.get("run_id"), "Strategia": account.config.strategy_id,
-                "Stato": "APERTO", "Modello": model, "Trade": position["trade_id"],
+                "Stato": "APERTO", "Modello": model, "Fonte O": position.get("source_strategy_id") or "—", "Trade": position["trade_id"],
                 "Direzione": side, "Apertura": position["entry_time"], "Chiusura": None,
                 "Ingresso": float(position["entry_price"]), "Prezzo/Uscita": mark,
                 "Quantità": quantity, "Nozionale": mark * quantity,
@@ -162,7 +162,7 @@ def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str
             rows.append({
                 "Run ID": trade.get("run_id", state.get("run_id")),
                 "Strategia": trade.get("strategy_id", account.config.strategy_id),
-                "Stato": "CHIUSO", "Modello": model, "Trade": trade["trade_id"],
+                "Stato": "CHIUSO", "Modello": model, "Fonte O": trade.get("source_strategy_id") or "—", "Trade": trade["trade_id"],
                 "Direzione": trade["side"], "Apertura": trade["entry_time"],
                 "Chiusura": trade["exit_time"], "Ingresso": float(trade["entry_price"]),
                 "Prezzo/Uscita": float(trade["exit_price"]), "Quantità": quantity,
@@ -234,6 +234,7 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
             hide_index=True,
             column_config={
                 "Modello": st.column_config.TextColumn(pinned=True),
+                "Fonte O": st.column_config.TextColumn(help="Per O: strategia la cui policy di uscita è congelata nel trade."),
                 "Quantità": st.column_config.NumberColumn(format="%.2f"),
                 "Nozionale": st.column_config.NumberColumn(format="%.2f USD"),
                 "Margine": st.column_config.NumberColumn(format="%.2f USD"),
@@ -397,7 +398,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=8)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=9)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:
