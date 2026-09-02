@@ -469,7 +469,13 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
     run_dir = run_dir or project_root / "data/live/paper/comparison_v1"
     metadata = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     run_id = str(metadata["run_id"])
-    output = output_root or project_root / "results/paper_analysis" / run_id / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # A raw ISO timestamp is useful to software but tells a human nothing in
+    # Explorer.  Keep snapshots separate, but give every new folder a readable
+    # name explaining both its content and when it was generated.
+    generated_at = datetime.now(timezone.utc)
+    analysis_root = project_root / "results/paper_analysis" / run_id
+    friendly_snapshot = generated_at.strftime("ANALISI_PAPER_%Y-%m-%d__%H-%M-%S_UTC")
+    output = output_root or analysis_root / friendly_snapshot
     output.mkdir(parents=True, exist_ok=True)
     scorecard, trades, history, open_positions = _run_states(run_dir, run_id)
     market, signals = _market_features(_market_data(project_root)), _read_jsonl(run_dir / "signals.jsonl")
@@ -497,7 +503,7 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
         if frame is not None and not frame.empty:
             frame.to_csv(output / f"{title.lower().replace(' ', '_')}.csv", index=False)
     metadata_out = {
-        "run_id": run_id, "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id, "generated_at_utc": generated_at.isoformat(),
         "analysis_mode": "read-only snapshot; live runtime unchanged",
         "market_m1_last_bar": str(market.datetime_utc.max()),
         "signals_analysed": str(len(signal_detail)), "strategies_analysed": str(len(scorecard)),
@@ -519,6 +525,19 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
     )
     _write_excel(output, tables, metadata_out)
     _write_trade_charts(output, candles_m1, candles_m5, attribution)
+    if output_root is None:
+        (analysis_root / "LEGGIMI - QUALE CARTELLA APRIRE.txt").write_text(
+            "Questa cartella contiene piu snapshot della STESSA sessione Paper.\n\n"
+            "Apri sempre la cartella con il nome piu recente che inizia con:\n"
+            "  ANALISI_PAPER_YYYY-MM-DD__HH-MM-SS_UTC\n\n"
+            f"L'ultima analisi creata e:\n  {output.name}\n\n"
+            "Dentro trovi prima di tutto:\n"
+            "  - paper_analysis.xlsx  (riepilogo leggibile)\n"
+            "  - trade_charts\\index.html  (grafici interattivi)\n"
+            "Le vecchie cartelle che iniziano solo con numeri sono snapshot storici\n"
+            "automatici dello stesso run: non sono strategie o esperimenti diversi.\n",
+            encoding="utf-8",
+        )
     return output
 
 
