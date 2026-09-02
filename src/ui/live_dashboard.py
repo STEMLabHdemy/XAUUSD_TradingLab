@@ -104,6 +104,38 @@ def _portfolio_totals(runtime: PaperRuntime) -> dict[str, float | int]:
     }
 
 
+def _strategy_catalogue_frame(runtime: PaperRuntime) -> pd.DataFrame:
+    """Describe live portfolios from their actual immutable configuration."""
+    rows: list[dict[str, object]] = []
+    for account in runtime.accounts.values():
+        config = account.config
+        if not config.probability_reversal_enabled:
+            short_reversal = "Disattivato: solo SL/TP"
+        elif config.short_reversal_mode == "disabled":
+            short_reversal = "Disattivato"
+        elif config.short_reversal_mode == "smart":
+            short_reversal = f"Proteggi, chiudi al {config.short_reversal_confirmations}Â° LONG"
+            if config.short_reversal_price_confirm_bars:
+                short_reversal += f" + prezzo ({config.short_reversal_price_confirm_bars} barre)"
+        else:
+            short_reversal = "Immediato"
+        filters: list[str] = []
+        if config.short_entry_max_prior_return_15m is not None:
+            filters.append(f"blocca se M15 > {config.short_entry_max_prior_return_15m:+.2%}")
+        if config.short_entry_max_range_15m is not None:
+            filters.append(f"blocca se range M15 > {config.short_entry_max_range_15m:.2%}")
+        rows.append({
+            "ID": config.strategy_id,
+            "Portafoglio": account.model,
+            "Ingressi": f"{config.entry_mode} · max {config.entry_rules[0]}",
+            "Reversal LONG": "Immediato" if config.probability_reversal_enabled else "Disattivato",
+            "Reversal SHORT": short_reversal,
+            "Filtro nuovi SHORT": " · ".join(filters) if filters else "Nessuno",
+        })
+    order = {strategy_id: index for index, strategy_id in enumerate(["0", *"ABCDEFGHIJKLMN"])}
+    return pd.DataFrame(rows).sort_values("ID", key=lambda column: column.map(order)).reset_index(drop=True)
+
+
 def _all_trades_frame(runtime: PaperRuntime, tick: object, display_timezone: str) -> pd.DataFrame:
     """One ledger containing every open and closed trade from every paper account."""
     rows: list[dict[str, object]] = []
@@ -403,17 +435,14 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
         if show_paper_controls:
             selected_model = st.selectbox("Strategia Paper", list(runtime.accounts), key="paper_selected_model")
             with st.container(border=True):
-                st.markdown("**Esperimento comparativo A/B/C/D**")
+                st.markdown("**Portafogli comparativi attivi**")
                 st.caption(
                     f"Una sola inferenza di **{runtime.source_model_label}** per candela M1 "
-                    "viene distribuita simultaneamente ai quattro ledger. A è il controllo invariato."
+                    f"viene distribuita simultaneamente ai {len(runtime.accounts)} ledger indipendenti. "
+                    "Le strategie 0/A–L sono controlli storici; M e N sono i nuovi filtri SHORT sperimentali."
                 )
-                st.dataframe(pd.DataFrame([
-                    {"ID": "A", "Strategia": "Baseline", "Ingressi": "Raffica attuale", "Reversal LONG": "Immediato", "Reversal SHORT": "Immediato"},
-                    {"ID": "B", "Strategia": "Anti-raffica", "Ingressi": "1 posizione + blocco post-stop", "Reversal LONG": "Immediato", "Reversal SHORT": "Immediato"},
-                    {"ID": "C", "Strategia": "Smart SHORT", "Ingressi": "Raffica attuale", "Reversal LONG": "Immediato", "Reversal SHORT": "Proteggi, chiudi al 2°"},
-                    {"ID": "D", "Strategia": "Combinata", "Ingressi": "1 posizione + blocco post-stop", "Reversal LONG": "Immediato", "Reversal SHORT": "Proteggi, chiudi al 2°"},
-                ]), hide_index=True, width="stretch")
+                with st.expander("Vedi configurazione dei portafogli", expanded=False):
+                    st.dataframe(_strategy_catalogue_frame(runtime), hide_index=True, width="stretch")
             mode_labels = {
                 "Controllata · 1 posizione": "controlled",
                 "Intermedia · fino a 3": "intermediate",
