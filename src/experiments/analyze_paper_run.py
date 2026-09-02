@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.chart.marker import DataPoint
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -286,23 +287,34 @@ def _write_excel(output: Path, tables: dict[str, pd.DataFrame], metadata: dict[s
         id_col = headers.get("strategy_id")
         if pnl_col and id_col:
             chart = BarChart()
+            chart.type = "col"
+            chart.style = 10
             chart.title, chart.y_axis.title, chart.x_axis.title = "PnL totale per strategia", "USD", "Strategia"
             chart.add_data(Reference(sheet, min_col=pnl_col, min_row=1, max_row=sheet.max_row), titles_from_data=True)
             chart.set_categories(Reference(sheet, min_col=id_col, min_row=2, max_row=sheet.max_row))
             chart.height, chart.width = 8, 16
+            chart.legend = None
+            # A single Excel series otherwise defaults to black/white.  Colour each
+            # strategy by sign so the chart is readable at a glance.
+            values = [sheet.cell(row=row, column=pnl_col).value for row in range(2, sheet.max_row + 1)]
+            for index, value in enumerate(values):
+                point = DataPoint(idx=index)
+                point.graphicalProperties.solidFill = "25B987" if float(value or 0) >= 0 else "E45B6A"
+                point.graphicalProperties.line.solidFill = "25B987" if float(value or 0) >= 0 else "E45B6A"
+                chart.series[0].dPt.append(point)
             sheet.add_chart(chart, "S2")
             pnl_letter = get_column_letter(pnl_col)
             sheet.conditional_formatting.add(f"{pnl_letter}2:{pnl_letter}{sheet.max_row}", ColorScaleRule(start_type="min", start_color="F8696B", mid_type="percentile", mid_value=50, mid_color="FFEB84", end_type="max", end_color="63BE7B"))
-    if "Hourly" in book.sheetnames:
-        sheet = book["Hourly"]
-        headers = {cell.value: cell.column for cell in sheet[1]}
-        if headers.get("net_pnl") and headers.get("exit_hour_utc"):
+    if "Hourly chart" in book.sheetnames:
+        sheet = book["Hourly chart"]
+        if sheet.max_column > 1:
             chart = LineChart()
-            chart.title, chart.y_axis.title = "PnL per ora (righe per strategia)", "USD"
-            chart.add_data(Reference(sheet, min_col=headers["net_pnl"], min_row=1, max_row=sheet.max_row), titles_from_data=True)
-            chart.set_categories(Reference(sheet, min_col=headers["exit_hour_utc"], min_row=2, max_row=sheet.max_row))
+            chart.style = 13
+            chart.title, chart.y_axis.title, chart.x_axis.title = "PnL realizzato per ora UTC", "USD", "Ora"
+            chart.add_data(Reference(sheet, min_col=2, max_col=sheet.max_column, min_row=1, max_row=sheet.max_row), titles_from_data=True, from_rows=False)
+            chart.set_categories(Reference(sheet, min_col=1, min_row=2, max_row=sheet.max_row))
             chart.height, chart.width = 8, 16
-            sheet.add_chart(chart, "J2")
+            sheet.add_chart(chart, "A28")
     book.save(workbook_path)
 
 
@@ -318,12 +330,14 @@ def analyze(project_root: Path, run_dir: Path | None = None, output_root: Path |
         signals = signals[signals.run_id.eq(run_id)].copy()
     signal_detail, signal_scorecard = _signal_quality(signals, market, minimum_move)
     long_short, hourly = _long_short_hourly(trades)
+    hourly_chart = (hourly.pivot(index="exit_hour_utc", columns="strategy_id", values="net_pnl").fillna(0).reset_index()
+                    if not hourly.empty else pd.DataFrame())
     reversal_detail, reversal_summary = _reversal_counterfactual(trades, market)
     shocks, shock_impact = _shock_impact(market, history)
     correlation = _correlations(history)
     tables = {
         "Strategy scorecard": scorecard, "Model quality 15m": signal_scorecard,
-        "Signal detail 15m": signal_detail, "Long short": long_short, "Hourly": hourly,
+        "Signal detail 15m": signal_detail, "Long short": long_short, "Hourly": hourly, "Hourly chart": hourly_chart,
         "Reversal summary": reversal_summary, "Reversal detail": reversal_detail,
         "Shock windows": shocks, "Shock impact": shock_impact, "Correlation": correlation,
     }
