@@ -125,7 +125,7 @@ def _strategy_catalogue_frame(runtime: PaperRuntime) -> pd.DataFrame:
         if config.short_entry_max_range_15m is not None:
             filters.append(f"blocca se range M15 > {config.short_entry_max_range_15m:.2%}")
         if config.strategy_id == "O":
-            filters.append("meta score 5/15/30 min + DD 15 min; max 1 posizione")
+            filters.append("seleziona 1 fonte tra 0/A–N: score 5/15/30 min + DD 15 min")
         rows.append({
             "ID": config.strategy_id,
             "Portafoglio": account.model,
@@ -397,7 +397,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=7)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=8)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:

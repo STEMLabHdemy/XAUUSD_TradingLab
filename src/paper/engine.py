@@ -949,17 +949,26 @@ class PaperRuntime:
             if self._inference is not None:
                 allocation = self._meta_allocation(self._inference, getattr(self, "_market_context", None))
                 for account in self.accounts.values():
-                    if account.config.strategy_id == "O":
-                        if new_bar and self._inference.available:
-                            account._record_event("META_ALLOCATION", tick, **allocation["metadata"])
-                        account.process(
-                            tick, self._inference, getattr(self, "_market_context", None),
-                            entry_blocker=allocation["entry_blocker"],
-                            entry_size_multiplier=allocation["weight"],
-                            allocation_metadata=allocation["metadata"],
-                        )
-                    else:
+                    if account.config.strategy_id != "O":
                         account.process(tick, self._inference, getattr(self, "_market_context", None))
+                meta_account = next((account for account in self.accounts.values() if account.config.strategy_id == "O"), None)
+                if meta_account is not None:
+                    source_id = allocation["metadata"].get("meta_source_strategy")
+                    source = next((account for account in self.accounts.values() if account.config.strategy_id == source_id), None)
+                    source_decision = source.snapshot().get("last_signal") if source is not None else None
+                    allocation["metadata"]["meta_source_decision"] = source_decision
+                    if allocation["entry_blocker"] is None and source_decision not in {"BUY", "SELL"}:
+                        allocation["entry_blocker"] = (
+                            f"meta allocator: source {source_id} did not open a new trade ({source_decision or 'N/D'})"
+                        )
+                    if new_bar and self._inference.available:
+                        meta_account._record_event("META_ALLOCATION", tick, **allocation["metadata"])
+                    meta_account.process(
+                        tick, self._inference, getattr(self, "_market_context", None),
+                        entry_blocker=allocation["entry_blocker"],
+                        entry_size_multiplier=allocation["weight"],
+                        allocation_metadata=allocation["metadata"],
+                    )
                 if self._inference.available and hasattr(self, "comparison_directory"):
                     # Export after a completed-M1 decision, not on every tick.
                     # Rewriting all CSVs on every UI refresh was avoidable disk IO.
@@ -1015,25 +1024,24 @@ class PaperRuntime:
     def _meta_allocation(
         self, inference: LiveInference, market_context: dict[str, float | None] | None,
     ) -> dict[str, Any]:
-        """Select one E-family source using only fast, already-observed PnL.
+        """Select one paper source using only fast, already-observed PnL.
 
-        This is intentionally a small, transparent first meta strategy.  It
-        never sums correlated E/M/N exposure: O has one position limit and
-        uses one selected source only to decide whether and how much to enter.
+        This is intentionally a small, transparent first meta strategy. It
+        ranks every existing paper portfolio, but never sums their correlated
+        exposure: O has one position limit and selects one source only.
         """
         metadata: dict[str, Any] = {
             "meta_source_strategy": None, "meta_score": None,
             "meta_pnl_5m": None, "meta_pnl_15m": None, "meta_pnl_30m": None,
             "meta_recent_drawdown_15m": None, "meta_allocation_weight": 0.0,
+            "meta_source_decision": None,
         }
         if not inference.available or inference.inference_time_utc is None:
             return {"entry_blocker": "meta allocator: inference unavailable", "weight": 1.0, "metadata": metadata}
         now = pd.Timestamp(inference.inference_time_utc)
         candidates: list[tuple[float, PaperAccount, dict[str, float | None]]] = []
-        # E/M/N share the Smart-SHORT family.  Comparing this family avoids
-        # pretending that many burst legs are independent strategies.
         for account in self.accounts.values():
-            if account.config.strategy_id not in {"E", "M", "N"}:
+            if account.config.strategy_id == "O":
                 continue
             state = account.snapshot()
             if not state.get("running"):
