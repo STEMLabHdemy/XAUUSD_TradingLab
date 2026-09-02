@@ -772,6 +772,7 @@ class PaperRuntime:
         self.comparison_directory = self.root / "data/live/paper/comparison_v1"
         self.run_metadata_path = self.comparison_directory / "run.json"
         self.run_id = self._load_or_create_run()
+        self._register_strategy_catalog()
         self._run_started_at = self._run_start_timestamp()
         self.signal_log_path = self.comparison_directory / "signals.jsonl"
         manifest = self.root / "models/baseline_manifest_provisional.json"
@@ -844,6 +845,19 @@ class PaperRuntime:
             return None if pd.isna(value) else value
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _register_strategy_catalog(self) -> None:
+        """Keep metadata descriptive when a new non-resetting strategy is added."""
+        try:
+            metadata = json.loads(self.run_metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        strategy_ids = [item.strategy_id for item in self.STRATEGIES]
+        if metadata.get("strategies") != strategy_ids or metadata.get("experiment") != "strategy_lab_0_to_n":
+            metadata["experiment"] = "strategy_lab_0_to_n"
+            metadata["strategies"] = strategy_ids
+            metadata["strategy_catalog_updated_at"] = datetime.now(timezone.utc).isoformat()
+            self.run_metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _record_shared_signal(self, tick: MarketTick, inference: LiveInference) -> None:
         if inference.signal_id is None:
