@@ -398,7 +398,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=9)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=10)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:

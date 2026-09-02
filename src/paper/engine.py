@@ -801,7 +801,7 @@ class PaperRuntime:
                      short_entry_max_range_15m=.003),
         # A new, independent ledger.  It has E's exit policy but admits new
         # positions only when the causal meta allocator approves them.
-        StrategySpec("O", "O · Meta momentum (esecuzione E)", short_reversal_mode="smart",
+        StrategySpec("O", "O · Meta momentum (policy della fonte)", short_reversal_mode="smart",
                      short_reversal_confirmations=3, max_open_positions=1),
     )
 
