@@ -71,8 +71,8 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
-        if self.strategy_id not in {"0", *set("ABCDEFGHIJKLMN")}:
-            raise ValueError("Strategy id must be 0 or between A and N")
+        if self.strategy_id not in {"0", *set("ABCDEFGHIJKLMNO")}:
+            raise ValueError("Strategy id must be 0 or between A and O")
         if self.max_open_positions_override is not None and self.max_open_positions_override < 1:
             raise ValueError("Maximum open positions override must be positive")
         if self.short_reversal_confirmations < 2:
@@ -370,6 +370,7 @@ class PaperAccount:
     def _record_decision(
         self, tick: MarketTick, inference: LiveInference, signal: str, reason: str,
         market_context: dict[str, float | None] | None = None,
+        allocation_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Persist every completed-candle decision, including explicit no-trade outcomes."""
         self._record_event(
@@ -383,6 +384,7 @@ class PaperAccount:
             short_reversal_count=self.state.get("short_reversal_count", 0),
             short_protect_mode=self.state.get("short_protect_mode", False),
             **(market_context or {}),
+            **(allocation_metadata or {}),
         )
         self._append_portfolio_snapshot(tick)
 
@@ -452,9 +454,10 @@ class PaperAccount:
 
     def _open(
         self, side: str, tick: MarketTick, inference: LiveInference, reason: str,
-        market_context: dict[str, float | None] | None = None,
+        market_context: dict[str, float | None] | None = None, allocation_weight: float = 1.0,
     ) -> None:
-        quantity, slip = self.config.position_size_units, self.config.slippage_price_per_side
+        quantity = self.config.position_size_units * allocation_weight
+        slip = self.config.slippage_price_per_side
         raw = tick.ask if side == "LONG" else tick.bid
         price = raw + slip if side == "LONG" else raw - slip
         stop = price - self.config.stop_loss_price if side == "LONG" and self.config.stop_loss_price else None
@@ -471,6 +474,7 @@ class PaperAccount:
             "model": self.model, "strategy_id": self.config.strategy_id, "run_id": self.state.get("run_id"),
             "regime": "not_available", "expected_return": None, "reason": reason,
             "signal_id": inference.signal_id,
+            "allocation_weight": allocation_weight,
             "entry_prior_return_15m_pct": (market_context or {}).get("prior_return_15m_pct"),
             "entry_range_15m_pct": (market_context or {}).get("range_15m_pct"),
         }
@@ -500,6 +504,7 @@ class PaperAccount:
             "signal_id": self.state.get("last_signal_id"),
             "entry_prior_return_15m_pct": position.get("entry_prior_return_15m_pct"),
             "entry_range_15m_pct": position.get("entry_range_15m_pct"),
+            "allocation_weight": position.get("allocation_weight", 1.0),
         }
         self.state["trades"].append(row)
         self.state["events"].append({**row, "event": "EXIT", "timestamp": row["exit_time"], "price": exit_price})
@@ -522,6 +527,8 @@ class PaperAccount:
     def process(
         self, tick: MarketTick, inference: LiveInference,
         market_context: dict[str, float | None] | None = None,
+        entry_blocker: str | None = None, entry_size_multiplier: float = 1.0,
+        allocation_metadata: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             self._mark(tick, save=False)
@@ -561,7 +568,7 @@ class PaperAccount:
                 self.state["last_signal"] = "EXIT"
                 self.state["last_reason"] = f"{protective_exits} protective exit(s)"
                 self._mark(tick, save=False)
-                self._record_decision(tick, inference, "EXIT", self.state["last_reason"], market_context)
+                self._record_decision(tick, inference, "EXIT", self.state["last_reason"], market_context, allocation_metadata)
                 self._save()
                 return
             score = float(inference.probability_up)
@@ -611,7 +618,7 @@ class PaperAccount:
                                 self.state["short_protect_mode"] = False
                                 self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
                                 self._mark(tick, save=False)
-                                self._record_decision(tick, inference, signal, self.state["last_reason"], market_context)
+                                self._record_decision(tick, inference, signal, self.state["last_reason"], market_context, allocation_metadata)
                                 self._save()
                                 return
                     else:
@@ -621,7 +628,7 @@ class PaperAccount:
                         self.state["short_protect_mode"] = False
                         self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
                         self._mark(tick, save=False)
-                        self._record_decision(tick, inference, signal, self.state["last_reason"], market_context)
+                        self._record_decision(tick, inference, signal, self.state["last_reason"], market_context, allocation_metadata)
                         self._save()
                         return
                 elif side == "SHORT":
@@ -638,6 +645,8 @@ class PaperAccount:
                 if self.config.max_daily_loss > 0 and daily_pnl <= -self.config.max_daily_loss: blockers.append("daily loss limit")
                 if len(positions) >= max_positions: blockers.append(f"position limit {len(positions)}/{max_positions}")
                 candidate_side = "LONG" if candidate == "BUY" else "SHORT"
+                if entry_blocker:
+                    blockers.append(entry_blocker)
                 prior_return = (market_context or {}).get("prior_return_15m_pct")
                 range_15m = (market_context or {}).get("range_15m_pct")
                 if (candidate_side == "SHORT" and self.config.short_entry_max_prior_return_15m is not None
@@ -658,9 +667,10 @@ class PaperAccount:
                 if positions and any(position["side"] != candidate_side for position in positions):
                     blockers.append("opposite position already open")
                 risk_amount = float(self.state["equity"]) * self.config.risk_per_trade_pct / 100
-                if self.config.stop_loss_price and self.config.stop_loss_price * self.config.position_size_units > risk_amount:
+                entry_units = self.config.position_size_units * entry_size_multiplier
+                if self.config.stop_loss_price and self.config.stop_loss_price * entry_units > risk_amount:
                     blockers.append("risk per trade limit")
-                required_margin = tick.ask * self.config.position_size_units / self.config.leverage
+                required_margin = tick.ask * entry_units / self.config.leverage
                 if required_margin > float(self.state["free_margin"]): blockers.append("insufficient virtual margin")
                 last_exit = pd.Timestamp(self.state["last_exit_time"]) if self.state["last_exit_time"] else None
                 if not positions and last_exit is not None and tick.datetime_utc < last_exit + pd.Timedelta(minutes=self.config.exit_cooldown_minutes):
@@ -676,7 +686,7 @@ class PaperAccount:
                     if self.state["persistence_count"] >= confirmations:
                         signal = candidate
                         reason = f"{self.config.entry_mode}: threshold and {confirmations} confirmation(s) passed"
-                        self._open(candidate_side, tick, inference, reason, market_context)
+                        self._open(candidate_side, tick, inference, reason, market_context, entry_size_multiplier)
                         self.state["pending_direction"], self.state["persistence_count"] = None, 0
                     else:
                         reason = f"confirmation {self.state['persistence_count']}/{confirmations}"
@@ -693,7 +703,7 @@ class PaperAccount:
                 reason = f"{reason}; smart short protection tightened on {smart_updates} position(s)"
             self.state["last_signal"], self.state["last_reason"] = signal, reason
             self._mark(tick, save=False)
-            self._record_decision(tick, inference, signal, reason, market_context)
+            self._record_decision(tick, inference, signal, reason, market_context, allocation_metadata)
             if not self.state.get("_skip_equity_history", False):
                 self.state["equity_history"].append({"timestamp": tick.datetime_utc.isoformat(), "equity": self.state["equity"], "balance": self.state["balance"]})
                 self.state["equity_history"] = self.state["equity_history"][-10_000:]
@@ -765,6 +775,10 @@ class PaperRuntime:
         StrategySpec("N", "N · E + blocco SHORT trend + volatilita", short_reversal_mode="smart",
                      short_reversal_confirmations=3, short_entry_max_prior_return_15m=.001,
                      short_entry_max_range_15m=.003),
+        # A new, independent ledger.  It has E's exit policy but admits new
+        # positions only when the causal meta allocator approves them.
+        StrategySpec("O", "O · Meta momentum (esecuzione E)", short_reversal_mode="smart",
+                     short_reversal_confirmations=3, max_open_positions=1),
     )
 
     def __init__(self, root: Path | str, config: PaperConfig):
@@ -834,7 +848,7 @@ class PaperRuntime:
         run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
         self.run_metadata_path.write_text(json.dumps({
             "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
-            "experiment": "strategy_lab_0_to_n", "strategies": [item.strategy_id for item in self.STRATEGIES],
+            "experiment": "strategy_lab_0_to_o", "strategies": [item.strategy_id for item in self.STRATEGIES],
         }, indent=2), encoding="utf-8")
         return run_id
 
@@ -853,8 +867,8 @@ class PaperRuntime:
         except (OSError, json.JSONDecodeError):
             return
         strategy_ids = [item.strategy_id for item in self.STRATEGIES]
-        if metadata.get("strategies") != strategy_ids or metadata.get("experiment") != "strategy_lab_0_to_n":
-            metadata["experiment"] = "strategy_lab_0_to_n"
+        if metadata.get("strategies") != strategy_ids or metadata.get("experiment") != "strategy_lab_0_to_o":
+            metadata["experiment"] = "strategy_lab_0_to_o"
             metadata["strategies"] = strategy_ids
             metadata["strategy_catalog_updated_at"] = datetime.now(timezone.utc).isoformat()
             self.run_metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -933,8 +947,19 @@ class PaperRuntime:
                 if self._inference.available and hasattr(self, "run_metadata_path"):
                     self._record_shared_signal(tick, self._inference)
             if self._inference is not None:
+                allocation = self._meta_allocation(self._inference, getattr(self, "_market_context", None))
                 for account in self.accounts.values():
-                    account.process(tick, self._inference, getattr(self, "_market_context", None))
+                    if account.config.strategy_id == "O":
+                        if new_bar and self._inference.available:
+                            account._record_event("META_ALLOCATION", tick, **allocation["metadata"])
+                        account.process(
+                            tick, self._inference, getattr(self, "_market_context", None),
+                            entry_blocker=allocation["entry_blocker"],
+                            entry_size_multiplier=allocation["weight"],
+                            allocation_metadata=allocation["metadata"],
+                        )
+                    else:
+                        account.process(tick, self._inference, getattr(self, "_market_context", None))
                 if self._inference.available and hasattr(self, "comparison_directory"):
                     # Export after a completed-M1 decision, not on every tick.
                     # Rewriting all CSVs on every UI refresh was avoidable disk IO.
@@ -955,6 +980,102 @@ class PaperRuntime:
             "prior_return_15m_pct": end / start - 1.0,
             "range_15m_pct": (float(window.mid_high.max()) - float(window.mid_low.min())) / end,
         }
+
+    @staticmethod
+    def _rolling_pnl_change(state: dict[str, Any], now: pd.Timestamp, minutes: int) -> float | None:
+        """PnL delta that would have been known before the current M1 decision."""
+        history = pd.DataFrame(state.get("portfolio_history", []))
+        if history.empty or "timestamp" not in history:
+            return None
+        history["timestamp"] = pd.to_datetime(history["timestamp"], utc=True, errors="coerce")
+        history = history.dropna(subset=["timestamp"]).sort_values("timestamp")
+        baseline = history[history["timestamp"] <= now - pd.Timedelta(minutes=minutes)]
+        if baseline.empty:
+            return None
+        row = baseline.iloc[-1]
+        prior = float(row["realized_pnl"]) + float(row["unrealized_pnl"])
+        current = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
+        return current - prior
+
+    @staticmethod
+    def _recent_drawdown_amount(state: dict[str, Any], now: pd.Timestamp, minutes: int = 15) -> float:
+        """Loss from the local peak only; this deliberately is not a 120m DD."""
+        history = pd.DataFrame(state.get("portfolio_history", []))
+        if history.empty or "timestamp" not in history:
+            return 0.0
+        history["timestamp"] = pd.to_datetime(history["timestamp"], utc=True, errors="coerce")
+        history = history.dropna(subset=["timestamp"])
+        window = history[history["timestamp"] >= now - pd.Timedelta(minutes=minutes)]
+        current = float(state["realized_pnl"]) + float(state["unrealized_pnl"])
+        if window.empty:
+            return 0.0
+        peak = max((float(row.realized_pnl) + float(row.unrealized_pnl) for row in window.itertuples()), default=current)
+        return min(0.0, current - peak)
+
+    def _meta_allocation(
+        self, inference: LiveInference, market_context: dict[str, float | None] | None,
+    ) -> dict[str, Any]:
+        """Select one E-family source using only fast, already-observed PnL.
+
+        This is intentionally a small, transparent first meta strategy.  It
+        never sums correlated E/M/N exposure: O has one position limit and
+        uses one selected source only to decide whether and how much to enter.
+        """
+        metadata: dict[str, Any] = {
+            "meta_source_strategy": None, "meta_score": None,
+            "meta_pnl_5m": None, "meta_pnl_15m": None, "meta_pnl_30m": None,
+            "meta_recent_drawdown_15m": None, "meta_allocation_weight": 0.0,
+        }
+        if not inference.available or inference.inference_time_utc is None:
+            return {"entry_blocker": "meta allocator: inference unavailable", "weight": 1.0, "metadata": metadata}
+        now = pd.Timestamp(inference.inference_time_utc)
+        candidates: list[tuple[float, PaperAccount, dict[str, float | None]]] = []
+        # E/M/N share the Smart-SHORT family.  Comparing this family avoids
+        # pretending that many burst legs are independent strategies.
+        for account in self.accounts.values():
+            if account.config.strategy_id not in {"E", "M", "N"}:
+                continue
+            state = account.snapshot()
+            if not state.get("running"):
+                continue
+            pnl_5 = self._rolling_pnl_change(state, now, 5)
+            if pnl_5 is None:
+                continue
+            pnl_15 = self._rolling_pnl_change(state, now, 15)
+            pnl_30 = self._rolling_pnl_change(state, now, 30)
+            recent_dd = self._recent_drawdown_amount(state, now)
+            # Saturation keeps one lucky burst from dictating an enormous size.
+            score = .60 * math.tanh(pnl_5 / 5.0)
+            if pnl_15 is not None:
+                score += .30 * math.tanh(pnl_15 / 10.0)
+            if pnl_30 is not None:
+                score += .10 * math.tanh(pnl_30 / 15.0)
+            score += .25 * math.tanh(recent_dd / 5.0)
+            candidates.append((score, account, {
+                "pnl_5m": pnl_5, "pnl_15m": pnl_15, "pnl_30m": pnl_30, "recent_dd": recent_dd,
+            }))
+        if not candidates:
+            return {"entry_blocker": "meta allocator: warming up (serve storico rolling di almeno 5 minuti)", "weight": 1.0, "metadata": metadata}
+        score, source, metrics = max(candidates, key=lambda item: item[0])
+        metadata.update({
+            "meta_source_strategy": source.config.strategy_id, "meta_score": score,
+            "meta_pnl_5m": metrics["pnl_5m"], "meta_pnl_15m": metrics["pnl_15m"],
+            "meta_pnl_30m": metrics["pnl_30m"], "meta_recent_drawdown_15m": metrics["recent_dd"],
+        })
+        # This is a context safety gate derived from the observed losing SHORT
+        # cluster.  It applies only to a new entry, never forces an exit.
+        if inference.candidate == "SELL":
+            prior_return = (market_context or {}).get("prior_return_15m_pct")
+            range_15m = (market_context or {}).get("range_15m_pct")
+            if prior_return is not None and prior_return > .001:
+                return {"entry_blocker": f"meta allocator: SHORT blocked, M15 trend {prior_return:+.3%}", "weight": 1.0, "metadata": metadata}
+            if range_15m is not None and range_15m > .003:
+                return {"entry_blocker": f"meta allocator: SHORT blocked, M15 range {range_15m:.3%}", "weight": 1.0, "metadata": metadata}
+        if score <= 0:
+            return {"entry_blocker": f"meta allocator: fast momentum not positive ({score:+.3f})", "weight": 1.0, "metadata": metadata}
+        weight = 1.5 if score >= .50 else 1.0
+        metadata["meta_allocation_weight"] = weight
+        return {"entry_blocker": None, "weight": weight, "metadata": metadata}
 
     def signals_frame(self) -> pd.DataFrame:
         if not self.signal_log_path.exists():
@@ -1073,7 +1194,7 @@ class PaperRuntime:
             self.run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
             self.run_metadata_path.write_text(json.dumps({
                 "run_id": self.run_id, "created_at": started_at,
-                "experiment": "strategy_lab_0_to_n", "strategies": [item.strategy_id for item in self.STRATEGIES],
+                "experiment": "strategy_lab_0_to_o", "strategies": [item.strategy_id for item in self.STRATEGIES],
                 "reset_reason": "user_requested_clean_simultaneous_cohort",
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             self._run_started_at = pd.Timestamp(started_at)

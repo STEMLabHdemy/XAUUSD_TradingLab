@@ -124,6 +124,8 @@ def _strategy_catalogue_frame(runtime: PaperRuntime) -> pd.DataFrame:
             filters.append(f"blocca se M15 > {config.short_entry_max_prior_return_15m:+.2%}")
         if config.short_entry_max_range_15m is not None:
             filters.append(f"blocca se range M15 > {config.short_entry_max_range_15m:.2%}")
+        if config.strategy_id == "O":
+            filters.append("meta score 5/15/30 min + DD 15 min; max 1 posizione")
         rows.append({
             "ID": config.strategy_id,
             "Portafoglio": account.model,
@@ -132,7 +134,7 @@ def _strategy_catalogue_frame(runtime: PaperRuntime) -> pd.DataFrame:
             "Reversal SHORT": short_reversal,
             "Filtro nuovi SHORT": " · ".join(filters) if filters else "Nessuno",
         })
-    order = {strategy_id: index for index, strategy_id in enumerate(["0", *"ABCDEFGHIJKLMN"])}
+    order = {strategy_id: index for index, strategy_id in enumerate(["0", *"ABCDEFGHIJKLMNO"])}
     return pd.DataFrame(rows).sort_values("ID", key=lambda column: column.map(order)).reset_index(drop=True)
 
 
@@ -395,7 +397,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=6)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=7)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:
@@ -439,7 +441,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                 st.caption(
                     f"Una sola inferenza di **{runtime.source_model_label}** per candela M1 "
                     f"viene distribuita simultaneamente ai {len(runtime.accounts)} ledger indipendenti. "
-                    "Le strategie 0/A–L sono controlli storici; M e N sono i nuovi filtri SHORT sperimentali."
+                    "Le strategie 0/A–L sono controlli storici; M/N filtrano gli SHORT e O è il meta-portafoglio sperimentale."
                 )
                 with st.expander("Vedi configurazione dei portafogli", expanded=False):
                     st.dataframe(_strategy_catalogue_frame(runtime), hide_index=True, width="stretch")

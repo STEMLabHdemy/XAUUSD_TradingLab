@@ -93,6 +93,32 @@ class PaperAccountTests(unittest.TestCase):
             self.assertEqual(position["side"], "SHORT")
             self.assertAlmostEqual(position["entry_prior_return_15m_pct"], .0005)
 
+    def test_meta_allocator_uses_only_fast_past_portfolio_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = PaperRuntime.__new__(PaperRuntime)
+            accounts = {}
+            for strategy_id, pnl in (("E", 6.0), ("M", -4.0), ("N", -2.0)):
+                account = PaperAccount(
+                    f"meta_{strategy_id}", f"Meta {strategy_id}",
+                    PaperConfig(strategy_id=strategy_id, persistence=1, cooldown_minutes=0), Path(directory),
+                )
+                account.start()
+                account.state["realized_pnl"], account.state["unrealized_pnl"] = pnl, 0.0
+                account.state["portfolio_history"] = [
+                    {"timestamp": "2026-08-28T09:59:00+00:00", "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+                    {"timestamp": "2026-08-28T10:14:00+00:00", "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+                    {"timestamp": "2026-08-28T10:24:00+00:00", "realized_pnl": 0.0, "unrealized_pnl": 0.0},
+                ]
+                accounts[strategy_id] = account
+            runtime.accounts = accounts
+            allocation = runtime._meta_allocation(
+                inference(30, .9), {"prior_return_15m_pct": 0.0, "range_15m_pct": 0.0},
+            )
+            self.assertIsNone(allocation["entry_blocker"])
+            self.assertEqual(allocation["metadata"]["meta_source_strategy"], "E")
+            self.assertGreater(allocation["metadata"]["meta_score"], 0.0)
+            self.assertGreaterEqual(allocation["weight"], 1.0)
+
     def test_mark_to_market_margin_and_stop_loss(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             account = self.account(directory, leverage=10)
