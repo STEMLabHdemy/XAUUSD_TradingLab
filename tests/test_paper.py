@@ -73,6 +73,26 @@ class PaperAccountTests(unittest.TestCase):
             self.assertEqual(reloaded.snapshot()["position"]["trade_id"], 1)
             self.assertTrue(reloaded.snapshot()["running"])
 
+    def test_short_trend_filter_blocks_only_new_short_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            account = self.account(directory, short_entry_max_prior_return_15m=.001)
+            account.start()
+            account.process(
+                tick(0, 100, 101), inference(0, .1),
+                {"prior_return_15m_pct": .0015, "range_15m_pct": .002},
+            )
+            self.assertIsNone(account.snapshot()["position"])
+            decision = account.events_frame().iloc[-1]
+            self.assertIn("SHORT trend filter", decision.decision_reason)
+            self.assertAlmostEqual(decision.prior_return_15m_pct, .0015)
+            account.process(
+                tick(1, 100, 101), inference(1, .1),
+                {"prior_return_15m_pct": .0005, "range_15m_pct": .002},
+            )
+            position = account.snapshot()["position"]
+            self.assertEqual(position["side"], "SHORT")
+            self.assertAlmostEqual(position["entry_prior_return_15m_pct"], .0005)
+
     def test_mark_to_market_margin_and_stop_loss(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             account = self.account(directory, leverage=10)

@@ -51,6 +51,10 @@ class PaperConfig:
     short_reversal_confirmations: int = 2
     short_reversal_mode: str | None = None
     short_reversal_price_confirm_bars: int = 0
+    # Optional entry filters used only by explicitly-labelled research portfolios.
+    # Values are decimal returns, e.g. .001 = +0.10%.
+    short_entry_max_prior_return_15m: float | None = None
+    short_entry_max_range_15m: float | None = None
     direction_lock_rearm_bars: int = 2
     probability_reversal_enabled: bool = True
 
@@ -67,8 +71,8 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
-        if self.strategy_id not in {"0", *set("ABCDEFGHIJKL")}:
-            raise ValueError("Strategy id must be 0 or between A and L")
+        if self.strategy_id not in {"0", *set("ABCDEFGHIJKLMN")}:
+            raise ValueError("Strategy id must be 0 or between A and N")
         if self.max_open_positions_override is not None and self.max_open_positions_override < 1:
             raise ValueError("Maximum open positions override must be positive")
         if self.short_reversal_confirmations < 2:
@@ -77,6 +81,9 @@ class PaperConfig:
             raise ValueError("Short reversal mode must be immediate, smart or disabled")
         if self.short_reversal_price_confirm_bars < 0 or self.direction_lock_rearm_bars < 2:
             raise ValueError("Confirmation bars must be non-negative; direction lock needs at least two bars")
+        for value in (self.short_entry_max_prior_return_15m, self.short_entry_max_range_15m):
+            if value is not None and value < 0:
+                raise ValueError("SHORT entry filters cannot be negative")
         if min(
             self.short_protect_break_even_pnl, self.short_protect_lock_trigger_pnl,
             self.short_protect_lock_pnl, self.short_protect_trailing_trigger_pnl,
@@ -360,7 +367,10 @@ class PaperAccount:
         })
         self.state["portfolio_history"] = self.state["portfolio_history"][-20_000:]
 
-    def _record_decision(self, tick: MarketTick, inference: LiveInference, signal: str, reason: str) -> None:
+    def _record_decision(
+        self, tick: MarketTick, inference: LiveInference, signal: str, reason: str,
+        market_context: dict[str, float | None] | None = None,
+    ) -> None:
         """Persist every completed-candle decision, including explicit no-trade outcomes."""
         self._record_event(
             "SIGNAL_DECISION", tick,
@@ -372,6 +382,7 @@ class PaperAccount:
             direction_locks=json.loads(json.dumps(self.state["reentry_gates"])),
             short_reversal_count=self.state.get("short_reversal_count", 0),
             short_protect_mode=self.state.get("short_protect_mode", False),
+            **(market_context or {}),
         )
         self._append_portfolio_snapshot(tick)
 
@@ -439,7 +450,10 @@ class PaperAccount:
                 changed += 1
         return changed
 
-    def _open(self, side: str, tick: MarketTick, inference: LiveInference, reason: str) -> None:
+    def _open(
+        self, side: str, tick: MarketTick, inference: LiveInference, reason: str,
+        market_context: dict[str, float | None] | None = None,
+    ) -> None:
         quantity, slip = self.config.position_size_units, self.config.slippage_price_per_side
         raw = tick.ask if side == "LONG" else tick.bid
         price = raw + slip if side == "LONG" else raw - slip
@@ -457,6 +471,8 @@ class PaperAccount:
             "model": self.model, "strategy_id": self.config.strategy_id, "run_id": self.state.get("run_id"),
             "regime": "not_available", "expected_return": None, "reason": reason,
             "signal_id": inference.signal_id,
+            "entry_prior_return_15m_pct": (market_context or {}).get("prior_return_15m_pct"),
+            "entry_range_15m_pct": (market_context or {}).get("range_15m_pct"),
         }
         self._positions().append(position)
         self.state["last_entry_time"] = position["entry_time"]
@@ -482,6 +498,8 @@ class PaperAccount:
             "gross_pnl": gross, "costs": costs, "net_pnl": net, "model": self.model,
             "strategy_id": self.config.strategy_id, "run_id": self.state.get("run_id"),
             "signal_id": self.state.get("last_signal_id"),
+            "entry_prior_return_15m_pct": position.get("entry_prior_return_15m_pct"),
+            "entry_range_15m_pct": position.get("entry_range_15m_pct"),
         }
         self.state["trades"].append(row)
         self.state["events"].append({**row, "event": "EXIT", "timestamp": row["exit_time"], "price": exit_price})
@@ -501,7 +519,10 @@ class PaperAccount:
             self._close_position(position, tick, reason)
         return len(positions)
 
-    def process(self, tick: MarketTick, inference: LiveInference) -> None:
+    def process(
+        self, tick: MarketTick, inference: LiveInference,
+        market_context: dict[str, float | None] | None = None,
+    ) -> None:
         with self._lock:
             self._mark(tick, save=False)
             if inference.signal_id is not None:
@@ -540,7 +561,7 @@ class PaperAccount:
                 self.state["last_signal"] = "EXIT"
                 self.state["last_reason"] = f"{protective_exits} protective exit(s)"
                 self._mark(tick, save=False)
-                self._record_decision(tick, inference, "EXIT", self.state["last_reason"])
+                self._record_decision(tick, inference, "EXIT", self.state["last_reason"], market_context)
                 self._save()
                 return
             score = float(inference.probability_up)
@@ -590,7 +611,7 @@ class PaperAccount:
                                 self.state["short_protect_mode"] = False
                                 self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
                                 self._mark(tick, save=False)
-                                self._record_decision(tick, inference, signal, self.state["last_reason"])
+                                self._record_decision(tick, inference, signal, self.state["last_reason"], market_context)
                                 self._save()
                                 return
                     else:
@@ -600,7 +621,7 @@ class PaperAccount:
                         self.state["short_protect_mode"] = False
                         self.state["last_signal"], self.state["last_reason"] = signal, f"{reason}: {closed} position(s)"
                         self._mark(tick, save=False)
-                        self._record_decision(tick, inference, signal, self.state["last_reason"])
+                        self._record_decision(tick, inference, signal, self.state["last_reason"], market_context)
                         self._save()
                         return
                 elif side == "SHORT":
@@ -617,6 +638,22 @@ class PaperAccount:
                 if self.config.max_daily_loss > 0 and daily_pnl <= -self.config.max_daily_loss: blockers.append("daily loss limit")
                 if len(positions) >= max_positions: blockers.append(f"position limit {len(positions)}/{max_positions}")
                 candidate_side = "LONG" if candidate == "BUY" else "SHORT"
+                prior_return = (market_context or {}).get("prior_return_15m_pct")
+                range_15m = (market_context or {}).get("range_15m_pct")
+                if (candidate_side == "SHORT" and self.config.short_entry_max_prior_return_15m is not None
+                        and prior_return is not None
+                        and prior_return > self.config.short_entry_max_prior_return_15m):
+                    blockers.append(
+                        "SHORT trend filter: M15 prior return "
+                        f"{prior_return:+.3%} exceeds {self.config.short_entry_max_prior_return_15m:+.3%}"
+                    )
+                if (candidate_side == "SHORT" and self.config.short_entry_max_range_15m is not None
+                        and range_15m is not None
+                        and range_15m > self.config.short_entry_max_range_15m):
+                    blockers.append(
+                        "SHORT volatility filter: M15 range "
+                        f"{range_15m:.3%} exceeds {self.config.short_entry_max_range_15m:.3%}"
+                    )
                 if self._side_is_blocked(candidate_side): blockers.append(f"anti-raffica: {candidate_side} blocked after stop")
                 if positions and any(position["side"] != candidate_side for position in positions):
                     blockers.append("opposite position already open")
@@ -639,7 +676,7 @@ class PaperAccount:
                     if self.state["persistence_count"] >= confirmations:
                         signal = candidate
                         reason = f"{self.config.entry_mode}: threshold and {confirmations} confirmation(s) passed"
-                        self._open(candidate_side, tick, inference, reason)
+                        self._open(candidate_side, tick, inference, reason, market_context)
                         self.state["pending_direction"], self.state["persistence_count"] = None, 0
                     else:
                         reason = f"confirmation {self.state['persistence_count']}/{confirmations}"
@@ -656,7 +693,7 @@ class PaperAccount:
                 reason = f"{reason}; smart short protection tightened on {smart_updates} position(s)"
             self.state["last_signal"], self.state["last_reason"] = signal, reason
             self._mark(tick, save=False)
-            self._record_decision(tick, inference, signal, reason)
+            self._record_decision(tick, inference, signal, reason, market_context)
             if not self.state.get("_skip_equity_history", False):
                 self.state["equity_history"].append({"timestamp": tick.datetime_utc.isoformat(), "equity": self.state["equity"], "balance": self.state["balance"]})
                 self.state["equity_history"] = self.state["equity_history"][-10_000:]
@@ -685,6 +722,8 @@ class StrategySpec:
     direction_lock_rearm_bars: int = 2
     probability_reversal_enabled: bool = True
     protection_overrides: tuple[tuple[str, float], ...] = ()
+    short_entry_max_prior_return_15m: float | None = None
+    short_entry_max_range_15m: float | None = None
 
     def __iter__(self):
         """Compatibility with the original five-value A-D test fixture."""
@@ -719,6 +758,13 @@ class PaperRuntime:
         StrategySpec("L", "L · Anti-raffica severa", anti_burst=True, max_open_positions=1, direction_lock_rearm_bars=3),
         # Pure control: no model-driven exit. Only SL, TP or session close can flatten it.
         StrategySpec("0", "0 · Solo SL/TP", probability_reversal_enabled=False),
+        # E is retained unchanged as the direct benchmark. M/N test only the
+        # independently-observed conditions that harmed historical SHORTs.
+        StrategySpec("M", "M · E + blocco SHORT contro-trend M15", short_reversal_mode="smart",
+                     short_reversal_confirmations=3, short_entry_max_prior_return_15m=.001),
+        StrategySpec("N", "N · E + blocco SHORT trend + volatilita", short_reversal_mode="smart",
+                     short_reversal_confirmations=3, short_entry_max_prior_return_15m=.001,
+                     short_entry_max_range_15m=.003),
     )
 
     def __init__(self, root: Path | str, config: PaperConfig):
@@ -787,7 +833,7 @@ class PaperRuntime:
         run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
         self.run_metadata_path.write_text(json.dumps({
             "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
-            "experiment": "strategy_lab_a_to_l", "strategies": [item.strategy_id for item in self.STRATEGIES],
+            "experiment": "strategy_lab_0_to_n", "strategies": [item.strategy_id for item in self.STRATEGIES],
         }, indent=2), encoding="utf-8")
         return run_id
 
@@ -832,6 +878,8 @@ class PaperRuntime:
             "short_reversal_price_confirm_bars": spec.short_reversal_price_confirm_bars,
             "direction_lock_rearm_bars": spec.direction_lock_rearm_bars,
             "probability_reversal_enabled": spec.probability_reversal_enabled,
+            "short_entry_max_prior_return_15m": spec.short_entry_max_prior_return_15m,
+            "short_entry_max_range_15m": spec.short_entry_max_range_15m,
         }
         values.update(dict(spec.protection_overrides))
         return replace(config, **values)
@@ -843,6 +891,7 @@ class PaperRuntime:
     def process(self, tick: MarketTick, completed_m1: pd.DataFrame) -> None:
         with self._lock:
             latest = int(completed_m1.timestamp.iloc[-1]) if not completed_m1.empty else None
+            new_bar = latest != self._last_bar
             latest_time = (
                 pd.Timestamp(completed_m1.datetime_utc.iloc[-1])
                 if not completed_m1.empty and "datetime_utc" in completed_m1 else None
@@ -853,7 +902,7 @@ class PaperRuntime:
                     and latest_time < self._run_started_at):
                 self._last_bar = latest
                 return
-            if latest != self._last_bar:
+            if new_bar:
                 inference = self.engine.predict(completed_m1)
                 price_confirmed = False
                 lookback = 3
@@ -865,14 +914,33 @@ class PaperRuntime:
                     inference, signal_id=latest, short_reversal_price_confirmed=price_confirmed,
                 ) if inference.available else inference
                 self._inferences = {name: self._inference for name in self.accounts}
+                self._market_context = self._m15_market_context(completed_m1)
                 self._last_bar = latest
                 if self._inference.available and hasattr(self, "run_metadata_path"):
                     self._record_shared_signal(tick, self._inference)
             if self._inference is not None:
                 for account in self.accounts.values():
-                    account.process(tick, self._inference)
+                    account.process(tick, self._inference, getattr(self, "_market_context", None))
                 if self._inference.available and hasattr(self, "comparison_directory"):
-                    self.write_strategy_exports()
+                    # Export after a completed-M1 decision, not on every tick.
+                    # Rewriting all CSVs on every UI refresh was avoidable disk IO.
+                    if new_bar:
+                        self.write_strategy_exports()
+
+    @staticmethod
+    def _m15_market_context(completed_m1: pd.DataFrame) -> dict[str, float | None]:
+        """Calculate one causal M15 context shared by every strategy."""
+        required = {"mid_close", "mid_high", "mid_low"}
+        if len(completed_m1) < 16 or not required.issubset(completed_m1.columns):
+            return {"prior_return_15m_pct": None, "range_15m_pct": None}
+        window = completed_m1.iloc[-16:]
+        start, end = float(window.mid_close.iloc[0]), float(window.mid_close.iloc[-1])
+        if start <= 0 or end <= 0:
+            return {"prior_return_15m_pct": None, "range_15m_pct": None}
+        return {
+            "prior_return_15m_pct": end / start - 1.0,
+            "range_15m_pct": (float(window.mid_high.max()) - float(window.mid_low.min())) / end,
+        }
 
     def signals_frame(self) -> pd.DataFrame:
         if not self.signal_log_path.exists():
@@ -949,6 +1017,14 @@ class PaperRuntime:
                 "entry_mode": account.config.entry_mode,
                 "open_positions": len(positions),
                 "position_limit": account.config.entry_rules[0],
+                "short_trend_filter_m15_pct": (
+                    None if account.config.short_entry_max_prior_return_15m is None
+                    else account.config.short_entry_max_prior_return_15m * 100
+                ),
+                "short_volatility_filter_m15_pct": (
+                    None if account.config.short_entry_max_range_15m is None
+                    else account.config.short_entry_max_range_15m * 100
+                ),
                 "position": f"{len(positions)} {positions[0]['side']}" if positions else "FLAT",
                 "signal": state["last_signal"],
                 "max_drawdown": state["max_drawdown"],
@@ -983,7 +1059,7 @@ class PaperRuntime:
             self.run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
             self.run_metadata_path.write_text(json.dumps({
                 "run_id": self.run_id, "created_at": started_at,
-                "experiment": "strategy_lab_a_to_l", "strategies": [item.strategy_id for item in self.STRATEGIES],
+                "experiment": "strategy_lab_0_to_n", "strategies": [item.strategy_id for item in self.STRATEGIES],
                 "reset_reason": "user_requested_clean_simultaneous_cohort",
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             self._run_started_at = pd.Timestamp(started_at)
