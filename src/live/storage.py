@@ -16,6 +16,21 @@ class LiveBarStore:
     def load(self) -> pd.DataFrame:
         return pd.read_parquet(self.path) if self.path.exists() else pd.DataFrame()
 
+    def retain(self, mask: pd.Series) -> int:
+        """Persist only rows selected by ``mask`` and return rows removed."""
+        existing = self.load()
+        if existing.empty:
+            return 0
+        keep = mask.reindex(existing.index, fill_value=False).astype(bool)
+        removed = int((~keep).sum())
+        if not removed:
+            return 0
+        retained = existing.loc[keep].reset_index(drop=True)
+        temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp.parquet")
+        retained.to_parquet(temporary, index=False, compression="zstd")
+        os.replace(temporary, self.path)
+        return removed
+
     def append_completed(self, bars: pd.DataFrame, metadata: dict[str, object] | None = None) -> int:
         incoming = bars[bars.is_complete.astype(bool)].copy() if "is_complete" in bars else bars.copy()
         if incoming.empty:

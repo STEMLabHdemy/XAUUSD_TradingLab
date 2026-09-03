@@ -14,6 +14,15 @@ from src.signals import AggregationConfig, SignalAggregator
 
 def _load(run_root: Path) -> pd.DataFrame:
     predictions = pd.read_parquet(run_root / "results/oos_predictions.parquet")
+    required = {
+        "timestamp", "datetime_utc", "open_bid", "high_bid", "low_bid", "close_bid",
+        "open_ask", "high_ask", "low_ask", "close_ask",
+    }
+    # New multi-timeframe runs export their exact aggregate OHLC rows.  This
+    # makes the economic audit use M5/M15 bars rather than accidentally merging
+    # a prediction timestamp back onto the source M1 candle.
+    if required.issubset(predictions.columns):
+        return predictions.sort_values("timestamp").reset_index(drop=True)
     manifest = json.loads((run_root / "manifest.json").read_text(encoding="utf-8"))
     market_path = Path(manifest.get("data_path", Path.cwd() / "data/processed/XAUUSD_M1_MASTER.parquet"))
     market = pd.read_parquet(

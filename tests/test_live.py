@@ -11,6 +11,7 @@ from src.live.clock import infer_server_utc_offset, normalize_server_epoch
 from src.live.mt5_client import MT5Client
 from src.live.storage import LiveBarStore
 from src.live.timeframes import aggregate_m1, chart_bars, compare_native_bars
+from src.data.market_hours import live_session_open_mask
 
 
 def m1_frame(rows: int = 10) -> pd.DataFrame:
@@ -91,6 +92,33 @@ class LiveStorageTests(unittest.TestCase):
 
     def test_client_has_no_order_routing_surface(self) -> None:
         self.assertFalse(hasattr(MT5Client, "order_send"))
+
+    def test_retain_removes_closed_session_bars(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LiveBarStore(Path(directory) / "live.parquet")
+            frame = m1_frame(3)
+            frame["datetime_utc"] = pd.to_datetime([
+                "2026-09-02T20:59:00Z",  # 22:59 Europe/Rome, still open
+                "2026-09-02T21:00:00Z",  # 23:00 Europe/Rome, daily break
+                "2026-09-05T10:00:00Z",  # Saturday
+            ], utc=True)
+            self.assertEqual(store.append_completed(frame), 3)
+            self.assertEqual(store.retain(live_session_open_mask(store.load())), 2)
+            saved = store.load()
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved.datetime_utc.iloc[0], pd.Timestamp("2026-09-02T20:59:00Z"))
+
+
+class LiveMarketCalendarTests(unittest.TestCase):
+    def test_daily_break_and_weekend_are_excluded(self) -> None:
+        frame = pd.DataFrame({"datetime_utc": pd.to_datetime([
+            "2026-09-02T20:59:00Z",  # Wed 22:59 Europe/Rome
+            "2026-09-02T21:00:00Z",  # Wed 23:00 Europe/Rome
+            "2026-09-02T22:00:00Z",  # Thu 00:00 Europe/Rome
+            "2026-09-05T10:00:00Z",  # Saturday
+            "2026-09-06T10:00:00Z",  # Sunday
+        ], utc=True)})
+        self.assertEqual(live_session_open_mask(frame).tolist(), [True, False, True, False, False])
 
 
 if __name__ == "__main__":

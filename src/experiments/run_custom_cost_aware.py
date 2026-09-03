@@ -15,12 +15,13 @@ def main() -> int:
     parser.add_argument("--data-path", type=Path, required=True)
     parser.add_argument("--rows", type=int, required=True)
     parser.add_argument("--horizon", type=int, required=True)
+    parser.add_argument("--timeframe-minutes", type=int, default=1)
     parser.add_argument("--minimum-move", type=float, required=True)
     parser.add_argument("--candidates", nargs="+", required=True)
     args = parser.parse_args()
     train_cost_aware(
         args.project_root.resolve(), args.output_root.resolve(), args.rows, args.horizon,
-        args.minimum_move, args.data_path.resolve(), tuple(args.candidates),
+        args.minimum_move, args.data_path.resolve(), tuple(args.candidates), args.timeframe_minutes,
     )
     _, audit = search(args.output_root.resolve(), args.horizon)
     print("\nAUDIT ECONOMICO")

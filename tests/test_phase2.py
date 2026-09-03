@@ -14,6 +14,7 @@ from src.data.pipeline import merge_bid_ask
 from src.data.snapshot import build_master_snapshot
 from src.data.market_hours import filter_market_closed
 from src.features import FeatureEngine
+from src.modeling.dataset import aggregate_training_bars
 from src.targets import TargetConfig, TargetEngine
 
 
@@ -92,6 +93,17 @@ class Phase2Tests(unittest.TestCase):
         self.assertAlmostEqual(result.loc[0, "future_long_net_3m"], .7)
         self.assertEqual(result.loc[0, "executable_direction_3m"], "UP")
         self.assertTrue(pd.isna(result.loc[5, "executable_direction_3m"]))
+
+    def test_m5_aggregation_and_h30_target_use_real_minutes(self) -> None:
+        bars = aggregate_training_bars(self.market.head(120), 5)
+        self.assertTrue(len(bars) >= 20)
+        self.assertTrue((bars.timestamp.diff().dropna() == 5 * 60_000).all())
+        labelled = TargetEngine(TargetConfig(horizons=(30,), bar_minutes=5)).transform(bars)
+        self.assertAlmostEqual(
+            labelled.future_return_30m.iloc[0],
+            bars.mid_close.iloc[6] / bars.mid_close.iloc[0] - 1,
+        )
+        self.assertTrue(labelled.future_return_30m.tail(6).isna().all())
 
     def test_streaming_snapshot_writes_canonical_parquet(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

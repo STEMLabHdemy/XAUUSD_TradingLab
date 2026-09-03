@@ -7,6 +7,8 @@ from threading import RLock
 import pandas as pd
 import yaml
 
+from src.data.market_hours import live_session_open_mask
+
 from .inference import LiveInference, LiveInferenceEngine
 from .mt5_client import ConnectionStatus, MT5Client, MarketTick
 from .storage import LiveBarStore
@@ -44,6 +46,11 @@ class LiveMarketService:
         )
         self.history_bars = max(500, int(config.get("history_m1_bars", 2600)))
         self.display_timezone = str(config.get("display_timezone", "Europe/Rome"))
+        # Remove already-persisted bars created in known closed sessions. This
+        # preserves the rest of the live data and prevents stale MT5 repeats
+        # from leaking into later charts, analysis or model features.
+        stored = self.store.load()
+        self.removed_closed_session_bars = self.store.retain(live_session_open_mask(stored, self.display_timezone))
         self._bars = pd.DataFrame()
         self._inference: LiveInference | None = None
         self._last_inference_timestamp: int | None = None
@@ -76,12 +83,15 @@ class LiveMarketService:
         with self._lock:
             status = self.client.connect()
             tick = self.client.latest_tick()
-            bars = self._refresh_bars()
+            raw_bars = self._refresh_bars()
+            session_mask = live_session_open_mask(raw_bars, self.display_timezone)
+            bars = raw_bars.loc[session_mask].reset_index(drop=True)
             completed = bars[bars.is_complete.astype(bool)].reset_index(drop=True)
             metadata = {
                 "source": "MetaTrader 5", "server": status.server, "symbol": status.symbol,
                 "server_utc_offset_seconds": status.server_utc_offset_seconds,
                 "timestamps_normalized_to": "UTC", "ask_ohlc": "approximated from BID OHLC plus MT5 bar spread",
+                "market_calendar": "Europe/Rome weekdays; daily MT5 closure 23:00-00:00 excluded",
             }
             added = self.store.append_completed(completed, metadata)
             latest_completed = int(completed.timestamp.iloc[-1]) if not completed.empty else None

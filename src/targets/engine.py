@@ -7,6 +7,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class TargetConfig:
+    bar_minutes: int = 1
     horizons: tuple[int, ...] = (1, 3, 5, 10, 15, 30, 60)
     neutral_cost_multiplier: float = 1.25
     executable_minimum_net_move: float = 0.50
@@ -18,6 +19,8 @@ class TargetEngine:
 
     def __init__(self, config: TargetConfig | None = None):
         self.config = config or TargetConfig()
+        if self.config.bar_minutes < 1:
+            raise ValueError("bar_minutes must be positive")
 
     def transform(self, data: pd.DataFrame) -> pd.DataFrame:
         required = {"timestamp", "mid_close", "spread_close"}
@@ -29,9 +32,12 @@ class TargetEngine:
         timestamp = pd.to_numeric(result.timestamp, errors="coerce")
         neutral_threshold = (result.spread_close.astype(float) / close) * self.config.neutral_cost_multiplier
         for horizon in self.config.horizons:
-            future_close = close.shift(-horizon)
+            if horizon < self.config.bar_minutes or horizon % self.config.bar_minutes:
+                raise ValueError(f"Horizon {horizon}m must be a multiple of bar_minutes={self.config.bar_minutes}")
+            steps = horizon // self.config.bar_minutes
+            future_close = close.shift(-steps)
             future_return = future_close / close - 1
-            future_timestamp = timestamp.shift(-horizon)
+            future_timestamp = timestamp.shift(-steps)
             known = future_close.notna() & future_timestamp.sub(timestamp).eq(horizon * 60_000)
             result[f"future_return_{horizon}m"] = future_return.where(known)
             binary = pd.Series(pd.NA, index=result.index, dtype="Int8")
@@ -45,16 +51,16 @@ class TargetEngine:
             execution_columns = {"open_bid", "open_ask", "close_bid", "close_ask"}
             if execution_columns.issubset(result.columns):
                 next_timestamp = timestamp.shift(-1)
-                executable = known & next_timestamp.sub(timestamp).eq(60_000)
+                executable = known & next_timestamp.sub(timestamp).eq(self.config.bar_minutes * 60_000)
                 round_trip_slippage = 2 * self.config.slippage_price_per_side
                 long_net = (
-                    result.close_bid.astype(float).shift(-horizon)
+                    result.close_bid.astype(float).shift(-steps)
                     - result.open_ask.astype(float).shift(-1)
                     - round_trip_slippage
                 )
                 short_net = (
                     result.open_bid.astype(float).shift(-1)
-                    - result.close_ask.astype(float).shift(-horizon)
+                    - result.close_ask.astype(float).shift(-steps)
                     - round_trip_slippage
                 )
                 result[f"future_long_net_{horizon}m"] = long_net.where(executable)

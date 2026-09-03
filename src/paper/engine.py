@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pandas as pd
 
+from src.data.market_hours import live_session_open_mask
 from src.live.inference import CostAwareLiveInferenceEngine, LiveInference, LiveInferenceEngine
 from src.live.mt5_client import MarketTick
 
@@ -942,6 +943,13 @@ class PaperRuntime:
 
     def process(self, tick: MarketTick, completed_m1: pd.DataFrame) -> None:
         with self._lock:
+            # Defence in depth: the live service already excludes the broker's
+            # closed sessions, but PaperRuntime must never turn a stale bar
+            # into a decision if it is called by another runner.
+            if not completed_m1.empty and "datetime_utc" in completed_m1:
+                completed_m1 = completed_m1.loc[
+                    live_session_open_mask(completed_m1)
+                ].reset_index(drop=True)
             latest = int(completed_m1.timestamp.iloc[-1]) if not completed_m1.empty else None
             new_bar = latest != self._last_bar
             latest_time = (
@@ -1126,7 +1134,19 @@ class PaperRuntime:
         if not self.signal_log_path.exists():
             return pd.DataFrame()
         rows = [json.loads(line) for line in self.signal_log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        return pd.DataFrame(rows)
+        signals = pd.DataFrame(rows)
+        # Old audit rows are retained on disk for traceability, but exports and
+        # analysis deliberately omit timestamps from the broker's closed
+        # daily/weekend sessions.
+        if not signals.empty and "timestamp" in signals:
+            signal_times = pd.to_datetime(signals["timestamp"], utc=True, errors="coerce")
+            valid_times = signal_times.notna()
+            mask = pd.Series(True, index=signals.index)
+            if valid_times.any():
+                calendar = pd.DataFrame({"datetime_utc": signal_times.loc[valid_times]})
+                mask.loc[valid_times] = live_session_open_mask(calendar).to_numpy()
+            signals = signals.loc[mask].reset_index(drop=True)
+        return signals
 
     def events_frame(self) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []

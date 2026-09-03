@@ -360,7 +360,10 @@ def live_candlestick_figure(
 
 
 @st.cache_resource
-def get_live_service(project_root: str) -> LiveMarketService:
+def get_live_service(project_root: str, service_schema_version: int) -> LiveMarketService:
+    # Versioned so a dashboard hot-reload creates the service with any new
+    # market-calendar safeguards instead of retaining the prior cached object.
+    _ = service_schema_version
     return LiveMarketService(Path(project_root))
 
 
@@ -396,7 +399,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     market_header_slot = st.container()
     chart_slot = st.container()
     try:
-        service = get_live_service(project_root)
+        service = get_live_service(project_root, service_schema_version=2)
         snapshot = service.poll()
         runtime = get_paper_runtime(project_root, runtime_schema_version=10)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)

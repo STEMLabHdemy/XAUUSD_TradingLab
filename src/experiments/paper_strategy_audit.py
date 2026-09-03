@@ -31,7 +31,7 @@ class _MemoryAccount(PaperAccount):
     def _record_event(self, event: str, tick: MarketTick, **values: Any) -> None:
         """Events are useful live, but are not an audit output or policy input here."""
 
-    def _record_decision(self, tick: MarketTick, inference: LiveInference, signal: str, reason: str) -> None:
+    def _record_decision(self, tick: MarketTick, inference: LiveInference, signal: str, reason: str, *args: Any, **kwargs: Any) -> None:
         """Keep the equity curve, without retaining one verbose event per simulated bar."""
         self._append_portfolio_snapshot(tick)
 
@@ -44,9 +44,9 @@ class _MemoryAccount(PaperAccount):
         self._sync_audit_day(timestamp)
         return self._audit_entries, self._audit_daily_pnl
 
-    def _open(self, side: str, tick: MarketTick, inference: LiveInference, reason: str) -> None:
+    def _open(self, side: str, tick: MarketTick, inference: LiveInference, reason: str, *args: Any, **kwargs: Any) -> None:
         self._sync_audit_day(tick.datetime_utc)
-        super()._open(side, tick, inference, reason)
+        super()._open(side, tick, inference, reason, *args, **kwargs)
         self._audit_entries += 1
 
     def _close_position(self, position: dict[str, Any], tick: MarketTick, reason: str) -> None:

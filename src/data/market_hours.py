@@ -3,6 +3,20 @@ from __future__ import annotations
 import pandas as pd
 
 
+def live_session_open_mask(frame: pd.DataFrame, timezone: str = "Europe/Rome") -> pd.Series:
+    """Return the broker-calendar mask used by the live MT5 feed.
+
+    TenTrade's XAUUSD feed is not tradable from 23:00 to 00:00 local time and
+    is ignored for the whole weekend.  Some terminals emit timestamped but
+    stale/recycled M1 bars in that daily break; calendar filtering is more
+    reliable than trying to infer freshness from repeated OHLC values.
+    """
+    if frame.empty:
+        return pd.Series(dtype=bool, index=frame.index)
+    local = pd.to_datetime(frame["datetime_utc"], utc=True).dt.tz_convert(timezone)
+    return local.dt.weekday.lt(5) & local.dt.hour.ne(23)
+
+
 def market_open_mask(frame: pd.DataFrame) -> pd.Series:
     """Identify tradable XAUUSD rows without modifying the raw source.
 

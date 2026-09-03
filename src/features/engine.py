@@ -8,6 +8,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class FeatureConfig:
+    bar_minutes: int = 1
     return_horizons: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 30, 60)
     atr_windows: tuple[int, ...] = (5, 15, 30, 60)
     volatility_windows: tuple[int, ...] = (5, 15, 30, 60)
@@ -31,6 +32,8 @@ class FeatureEngine:
 
     def __init__(self, config: FeatureConfig | None = None):
         self.config = config or FeatureConfig()
+        if self.config.bar_minutes < 1:
+            raise ValueError("bar_minutes must be positive")
 
     def transform(self, data: pd.DataFrame) -> pd.DataFrame:
         missing = self.INPUT_COLUMNS.difference(data.columns)
@@ -46,9 +49,11 @@ class FeatureEngine:
         timestamps = pd.to_numeric(frame.timestamp, errors="coerce")
 
         for horizon in self.config.return_horizons:
-            contiguous = timestamps.sub(timestamps.shift(horizon)).eq(horizon * 60_000)
-            frame[f"return_{horizon}m"] = (close / close.shift(horizon) - 1).where(contiguous)
-            frame[f"log_return_{horizon}m"] = np.log(close / close.shift(horizon)).where(contiguous)
+            steps = max(1, int(round(horizon / self.config.bar_minutes)))
+            actual_minutes = steps * self.config.bar_minutes
+            contiguous = timestamps.sub(timestamps.shift(steps)).eq(actual_minutes * 60_000)
+            frame[f"return_{horizon}m"] = (close / close.shift(steps) - 1).where(contiguous)
+            frame[f"log_return_{horizon}m"] = np.log(close / close.shift(steps)).where(contiguous)
 
         candle_range = high - low
         signed_body = close - open_
@@ -68,7 +73,9 @@ class FeatureEngine:
             atr = true_range.rolling(window, min_periods=window).mean()
             frame[f"atr_{window}"] = atr
             frame[f"atr_{window}_pct"] = atr / close
-        one_minute_log_return = np.log(close / previous_close).where(timestamps.diff().eq(60_000))
+        one_minute_log_return = np.log(close / previous_close).where(
+            timestamps.diff().eq(self.config.bar_minutes * 60_000)
+        )
         for window in self.config.volatility_windows:
             frame[f"rolling_volatility_{window}m"] = one_minute_log_return.rolling(window, min_periods=window).std()
 

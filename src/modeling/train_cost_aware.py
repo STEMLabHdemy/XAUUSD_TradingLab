@@ -16,8 +16,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 
-from src.features import FeatureEngine
-from src.modeling.dataset import load_recent_rows
+from src.features import FeatureConfig, FeatureEngine
+from src.modeling.dataset import aggregate_training_bars, load_recent_rows
 from src.modeling.walk_forward import WalkForwardConfig, WalkForwardSplitter, temporal_development_oos_split
 from src.targets import TargetConfig, TargetEngine
 
@@ -106,13 +106,25 @@ def _metrics(target: pd.Series, probabilities: np.ndarray) -> dict[str, float]:
     }
 
 
-def _dataset(master: Path, rows: int, horizon: int, minimum_move: float) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+def _dataset(master: Path, rows: int, horizon: int, minimum_move: float, timeframe_minutes: int = 1) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     market = load_recent_rows(master, rows)
+    market = aggregate_training_bars(market, timeframe_minutes)
     original_columns = set(market.columns)
-    featured = FeatureEngine().transform(market)
+    # Keep feature labels truthful: on M5, ``return_15m`` is three complete
+    # M5 bars, never a misleading one-bar return named "1m".
+    default_features = FeatureConfig()
+    real_minute_horizons = tuple(
+        value for value in default_features.return_horizons
+        if value >= timeframe_minutes and value % timeframe_minutes == 0
+    )
+    featured = FeatureEngine(FeatureConfig(
+        bar_minutes=timeframe_minutes,
+        return_horizons=real_minute_horizons,
+    )).transform(market)
     labelled = TargetEngine(TargetConfig(
         horizons=(horizon,), executable_minimum_net_move=minimum_move,
         slippage_price_per_side=.05,
+        bar_minutes=timeframe_minutes,
     )).transform(featured)
     target_column = f"executable_direction_{horizon}m"
     feature_columns = [
@@ -136,15 +148,19 @@ def train_cost_aware(
     minimum_move: float,
     data_path: Path | None = None,
     candidate_names: tuple[str, ...] | None = None,
+    timeframe_minutes: int = 1,
 ) -> pd.DataFrame:
+    if horizon % timeframe_minutes:
+        raise ValueError("horizon must be a multiple of timeframe_minutes")
     features, target, labelled = _dataset(
         data_path or project_root / "data/processed/XAUUSD_M1_MASTER.parquet",
-        rows, horizon, minimum_move,
+        rows, horizon, minimum_move, timeframe_minutes,
     )
-    development, oos = temporal_development_oos_split(len(features), oos_fraction=.20, gap=60)
+    purge_gap_rows = max(horizon // timeframe_minutes, 60 // timeframe_minutes)
+    development, oos = temporal_development_oos_split(len(features), oos_fraction=.20, gap=purge_gap_rows)
     walk = WalkForwardSplitter(WalkForwardConfig(
         initial_train_size=max(1000, len(development) // 2),
-        test_size=max(500, len(development) // 4), gap=60, mode="expanding",
+        test_size=max(500, len(development) // 4), gap=purge_gap_rows, mode="expanding",
     ))
     output_root.mkdir(parents=True, exist_ok=True)
     model_dir = output_root / "models"
@@ -153,6 +169,8 @@ def train_cost_aware(
     result_dir.mkdir(exist_ok=True)
     prediction_output = labelled.loc[oos, [
         "timestamp", "datetime_utc", "mid_close", "spread_close",
+        "open_bid", "high_bid", "low_bid", "close_bid",
+        "open_ask", "high_ask", "low_ask", "close_ask",
         f"future_long_net_{horizon}m", f"future_short_net_{horizon}m",
         f"executable_direction_{horizon}m",
     ]].reset_index(drop=True)
@@ -198,11 +216,11 @@ def train_cost_aware(
     prediction_output.to_parquet(result_dir / "oos_predictions.parquet", index=False)
     manifest = {
         "status": "research_only", "rows_requested": rows, "usable_rows": len(features),
-        "horizon_minutes": horizon, "minimum_net_move": minimum_move,
+        "timeframe_minutes": timeframe_minutes, "horizon_minutes": horizon, "minimum_net_move": minimum_move,
         "slippage_price_per_side": .05, "labels": LABELS,
         "feature_columns": list(features.columns), "candidates": [candidate.name for candidate in selected_candidates],
         "data_path": str(data_path or project_root / "data/processed/XAUUSD_M1_MASTER.parquet"),
-        "random_shuffle": False, "purge_gap_rows": 60, "oos_rows": len(oos),
+        "random_shuffle": False, "purge_gap_rows": purge_gap_rows, "oos_rows": len(oos),
     }
     (output_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return metrics_frame
@@ -214,6 +232,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--rows", type=int, default=500_000)
     parser.add_argument("--horizon", type=int, required=True)
+    parser.add_argument("--timeframe-minutes", type=int, default=1)
     parser.add_argument("--minimum-move", type=float, default=.50)
     parser.add_argument("--data-path", type=Path)
     parser.add_argument("--candidates", nargs="+")
@@ -221,7 +240,7 @@ def main() -> int:
     metrics = train_cost_aware(
         args.project_root.resolve(), args.output_root.resolve(), args.rows,
         args.horizon, args.minimum_move, args.data_path.resolve() if args.data_path else None,
-        tuple(args.candidates) if args.candidates else None,
+        tuple(args.candidates) if args.candidates else None, args.timeframe_minutes,
     )
     print(metrics[metrics.evaluation.eq("untouched_oos")].to_string(index=False))
     return 0
