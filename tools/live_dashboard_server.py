@@ -50,7 +50,9 @@ def _load_indicator_states() -> tuple[str, dict[str, dict[str, Any]]]:
     states = {}
     for path in directory.glob("indicator_v1_*/state.json"):
         state = json.loads(path.read_text(encoding="utf-8"))
-        if state.get("run_id") == run_id: states[str(state["model"])] = state
+        strategy_id = str(state.get("config", {}).get("strategy_id", ""))
+        if state.get("run_id") == run_id and strategy_id.startswith("I"):
+            states[str(state["model"])] = state
     return run_id, states
 
 
@@ -91,25 +93,15 @@ def indicators_page() -> FileResponse:
 
 
 @app.get("/api/indicators")
-def indicators() -> dict[str, Any]:
-    try:
-        run_id, accounts = _load_indicator_states()
-        cards = []
-        for name, state in accounts.items():
-            cards.append({"name": name, "strategy": state.get("config", {}).get("strategy_id", "?"),
-                          "total_pnl": _number(state["realized_pnl"]) + _number(state["unrealized_pnl"]),
-                          "trades": len(state.get("trades") or []), "open_positions": len(state.get("positions") or []),
-                          "last_signal": state.get("last_signal"), "last_reason": state.get("last_reason")})
-        return {"run_id": run_id, "cards": cards}
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc) or repr(exc)) from exc
+def indicators(strategy: str | None = None) -> dict[str, Any]:
+    return snapshot(strategy=strategy, source="indicators")
 
 
 @app.get("/api/snapshot")
-def snapshot(strategy: str | None = None) -> dict[str, Any]:
+def snapshot(strategy: str | None = None, source: str = "model") -> dict[str, Any]:
     """Return a compact read-only view of the active headless paper session."""
     try:
-        run_id, accounts = _load_ledger_states()
+        run_id, accounts = _load_indicator_states() if source == "indicators" else _load_ledger_states()
         tick, bars = _market_payload()
         account_names = list(accounts)
         selected = strategy if strategy in accounts else account_names[0]
@@ -166,7 +158,7 @@ def snapshot(strategy: str | None = None) -> dict[str, Any]:
             "tick": tick,
             "candles": candles, "markers": markers[-80:], "levels": levels,
             "selected": selected, "strategies": account_names,
-            "cards": cards, "run_id": run_id, "inference": _latest_inference(),
+            "cards": cards, "run_id": run_id, "inference": _latest_inference() if source == "model" else None,
         }
     except Exception as exc:  # Browser gets the actionable failure, server stays alive.
         traceback.print_exc()

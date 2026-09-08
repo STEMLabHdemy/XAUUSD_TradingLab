@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 from threading import RLock
 from time import sleep
 from typing import Any
@@ -73,8 +74,8 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
-        if self.strategy_id not in {"0", *set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")}:
-            raise ValueError("Strategy id must be 0 or an uppercase letter")
+        if not re.fullmatch(r"(?:0|[A-Z]|I\d{2})", self.strategy_id):
+            raise ValueError("Strategy id must be a supported paper identifier")
         if self.max_open_positions_override is not None and self.max_open_positions_override < 1:
             raise ValueError("Maximum open positions override must be positive")
         if self.short_reversal_confirmations < 2:
