@@ -7,10 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.io as pio
 from plotly.subplots import make_subplots
 import streamlit as st
-from xauusd_realtime_chart import xauusd_realtime_chart
 import yaml
 
 from src.live import LiveMarketService
@@ -134,7 +132,7 @@ def _strategy_catalogue_frame(runtime: PaperRuntime) -> pd.DataFrame:
             "Reversal SHORT": short_reversal,
             "Filtro nuovi SHORT": " · ".join(filters) if filters else "Nessuno",
         })
-    order = {strategy_id: index for index, strategy_id in enumerate(["0", *"ABCDEFGHIJKLMNO"])}
+    order = {strategy_id: index for index, strategy_id in enumerate(["0", *"ABCDEFGHIJKLMNOP"])}
     return pd.DataFrame(rows).sort_values("ID", key=lambda column: column.map(order)).reset_index(drop=True)
 
 
@@ -202,6 +200,13 @@ def _render_portfolio_overview(runtime: PaperRuntime, tick: object, display_time
 
         st.markdown("**Rendimento per strategia**")
         comparison = runtime.comparison().sort_values("strategy_id")
+        source_models = comparison["source_model"].dropna().unique().tolist()
+        selected_source = st.selectbox(
+            "Gruppo modello visualizzato", source_models,
+            key="paper_overview_source_model",
+            help="I ledger restano tutti attivi; qui limitiamo solo le card renderizzate per mantenere leggera la pagina.",
+        )
+        comparison = comparison.loc[comparison["source_model"].eq(selected_source)]
         cards = comparison.to_dict("records")
         for offset in range(0, len(cards), 4):
             with st.container(horizontal=True):
@@ -378,7 +383,7 @@ def get_paper_runtime(project_root: str, runtime_schema_version: int) -> PaperRu
     return PaperRuntime(root, PaperConfig(**values))
 
 
-@st.fragment(run_every=1)
+@st.fragment(run_every=3)
 def live_market_panel(project_root: str, show_paper_controls: bool = False) -> None:
     with st.container(horizontal=True, vertical_alignment="bottom"):
         timeframe = st.segmented_control(
@@ -401,7 +406,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     try:
         service = get_live_service(project_root, service_schema_version=2)
         snapshot = service.poll()
-        runtime = get_paper_runtime(project_root, runtime_schema_version=10)
+        runtime = get_paper_runtime(project_root, runtime_schema_version=13)
         completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
         runtime.process(snapshot.tick, completed)
     except Exception as exc:
@@ -490,15 +495,17 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
     selected_state = selected_account.snapshot()
     figure = live_candlestick_figure(
         snapshot.m1_bars, str(timeframe), service.display_timezone, int(visible), bool(auto_follow),
-        selected_account.events_frame() if show_paper_controls else None,
+        selected_account.events_frame(limit=600) if show_paper_controls else None,
     )
-    figure_payload = json.loads(pio.to_json(figure, validate=False, remove_uids=True))
-    figure_payload.get("layout", {}).pop("template", None)
     with chart_slot:
-        xauusd_realtime_chart(
-            figure_payload,
+        # The experimental browser component occasionally mounted an empty
+        # canvas after a Streamlit fragment refresh.  Native Plotly is less
+        # clever about retaining viewport state but is robust and renders the
+        # actual MT5 bars immediately.
+        st.plotly_chart(
+            figure,
             key=f"live_chart_{show_paper_controls}",
-            viewport_revision=str(figure.layout.uirevision),
+            width="stretch",
             config={
                 "scrollZoom": True,
                 "displayModeBar": True,
@@ -792,7 +799,7 @@ def live_market_panel(project_root: str, show_paper_controls: bool = False) -> N
                     f"{runtime.run_id}_trades_filtrati.csv", "text/csv",
                     icon=":material/download:",
                 )
-            with st.expander("Export audit completo"):
+            if st.toggle("Prepara export audit completo", value=False, key="paper_show_audit_export"):
                 signals = runtime.signals_frame()
                 events = runtime.events_frame()
                 snapshots = runtime.portfolio_history_frame()

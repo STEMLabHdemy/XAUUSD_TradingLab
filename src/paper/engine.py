@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 from threading import RLock
+from time import sleep
 from typing import Any
 from uuid import uuid4
 
@@ -72,8 +73,8 @@ class PaperConfig:
             raise ValueError("Costs and limits cannot be negative")
         if self.entry_mode not in {"controlled", "intermediate", "burst"}:
             raise ValueError("Entry mode must be controlled, intermediate or burst")
-        if self.strategy_id not in {"0", *set("ABCDEFGHIJKLMNO")}:
-            raise ValueError("Strategy id must be 0 or between A and O")
+        if self.strategy_id not in {"0", *set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")}:
+            raise ValueError("Strategy id must be 0 or an uppercase letter")
         if self.max_open_positions_override is not None and self.max_open_positions_override < 1:
             raise ValueError("Maximum open positions override must be positive")
         if self.short_reversal_confirmations < 2:
@@ -213,7 +214,17 @@ class PaperAccount:
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        # Windows can briefly keep state.json open while the read-only local
+        # dashboard refreshes. Retrying preserves atomic replacement and keeps
+        # one transient file lock from interrupting the live paper loop.
+        for attempt in range(5):
+            try:
+                temporary.replace(self.path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                sleep(.05 * (attempt + 1))
 
     def start(self) -> None:
         with self._lock:
@@ -734,15 +745,27 @@ class PaperAccount:
                 self.state["equity_history"] = self.state["equity_history"][-10_000:]
             self._save()
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, compact: bool = False) -> dict[str, Any]:
         with self._lock:
+            if compact:
+                keep = (
+                    "account_id", "model", "config", "config_fingerprint", "running", "balance",
+                    "realized_pnl", "equity", "unrealized_pnl", "used_margin", "free_margin",
+                    "exposure", "peak_equity", "max_drawdown", "position", "positions", "run_id",
+                    "experiment_started_at", "last_signal", "last_reason", "last_signal_id",
+                )
+                result = {key: self.state.get(key) for key in keep}
+                result["trades_count"] = len(self.state.get("trades", []))
+                return json.loads(json.dumps(result))
             return json.loads(json.dumps(self.state))
 
     def trades_frame(self) -> pd.DataFrame:
         return pd.DataFrame(self.snapshot()["trades"])
 
-    def events_frame(self) -> pd.DataFrame:
-        return pd.DataFrame(self.snapshot()["events"])
+    def events_frame(self, limit: int | None = None) -> pd.DataFrame:
+        with self._lock:
+            events = self.state.get("events", [])
+            return pd.DataFrame(json.loads(json.dumps(events[-limit:] if limit is not None else events)))
 
 
 @dataclass(frozen=True)
@@ -800,6 +823,7 @@ class PaperRuntime:
         StrategySpec("N", "N · E + blocco SHORT trend + volatilita", short_reversal_mode="smart",
                      short_reversal_confirmations=3, short_entry_max_prior_return_15m=.001,
                      short_entry_max_range_15m=.003),
+        StrategySpec("P", "P - Baseline + blocco SHORT contro-trend M15", short_entry_max_prior_return_15m=.0005),
         # A new, independent ledger.  It has E's exit policy but admits new
         # positions only when the causal meta allocator approves them.
         StrategySpec("O", "O · Meta momentum (policy della fonte)", short_reversal_mode="smart",
@@ -829,36 +853,43 @@ class PaperRuntime:
                     model_path, manifest_path = Path(item["artifact"]), Path(item["manifest"])
                     if model_path.exists() and manifest_path.exists():
                         account_key = hashlib.sha256(str(model_path.resolve()).encode()).hexdigest()[:12]
-                    custom.append((str(item["label"]), model_path, manifest_path, account_key, str(item.get("kind", "binary"))))
+                        custom.append((str(item["label"]), model_path, manifest_path, account_key, str(item.get("kind", "binary"))))
                 if custom:
                     definitions = custom
             except (OSError, KeyError, TypeError, json.JSONDecodeError):
                 pass
-        available = next((definition for definition in definitions if definition[1].exists() and definition[2].exists()), None)
-        if available is None:
+        definitions = [definition for definition in definitions if definition[1].exists() and definition[2].exists()]
+        if not definitions:
             raise RuntimeError("Nessun modello compatibile disponibile per il Paper")
-        source_label, path, model_manifest, key, kind = available
-        self.source_model_label = source_label
-        self.engine = CostAwareLiveInferenceEngine(path, model_manifest) if kind == "cost_aware" else LiveInferenceEngine(
-            path, model_manifest, config.buy_threshold, config.sell_threshold,
-        )
-        # Exactly one model invocation creates one signal event, fan-out to A-L.
-        self.engines = {source_label: self.engine}
+        self.source_model_label = " + ".join(item[0] for item in definitions)
+        self.engines: dict[str, CostAwareLiveInferenceEngine | LiveInferenceEngine] = {}
         self.accounts: dict[str, PaperAccount] = {}
-        for spec in self.STRATEGIES:
-            account_key = f"comparison_v1_{key}_{spec.strategy_id.lower()}"
-            strategy_config = self._strategy_config(config, spec)
-            is_new_account = not (self.comparison_directory / account_key / "state.json").exists()
-            self.accounts[spec.label] = PaperAccount(
-                account_key, spec.label, strategy_config, self.comparison_directory,
+        self._account_source: dict[str, str] = {}
+        multiple_models = len(definitions) > 1
+        for source_label, path, model_manifest, key, kind in definitions:
+            engine = CostAwareLiveInferenceEngine(path, model_manifest) if kind == "cost_aware" else LiveInferenceEngine(
+                path, model_manifest, config.buy_threshold, config.sell_threshold,
             )
-            self.accounts[spec.label].set_run_id(self.run_id)
-            if is_new_account and any(account.snapshot().get("running") for account in self.accounts.values()):
-                self.accounts[spec.label].set_run_id(self.run_id, datetime.now(timezone.utc).isoformat())
-                self.accounts[spec.label].start()
+            self.engines[source_label] = engine
+            for spec in self.STRATEGIES:
+                account_key = f"comparison_v1_{key}_{spec.strategy_id.lower()}"
+                account_label = f"{source_label} · {spec.label}" if multiple_models else spec.label
+                strategy_config = self._strategy_config(config, spec)
+                is_new_account = not (self.comparison_directory / account_key / "state.json").exists()
+                self.accounts[account_label] = PaperAccount(
+                    account_key, account_label, strategy_config, self.comparison_directory,
+                )
+                self._account_source[account_label] = source_label
+                self.accounts[account_label].set_run_id(self.run_id)
+                if is_new_account and any(account.snapshot().get("running") for account in self.accounts.values()):
+                    self.accounts[account_label].set_run_id(self.run_id, datetime.now(timezone.utc).isoformat())
+                    self.accounts[account_label].start()
+        # Compatibility alias for code paths that operate on the primary model.
+        self.engine = next(iter(self.engines.values()))
         self._last_bar: int | None = None
         self._inference: LiveInference | None = None
         self._inferences: dict[str, LiveInference] = {}
+        self.export_after_process = True
         self._lock = RLock()
 
     def _load_or_create_run(self) -> str:
@@ -873,7 +904,7 @@ class PaperRuntime:
         run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
         self.run_metadata_path.write_text(json.dumps({
             "run_id": run_id, "created_at": datetime.now(timezone.utc).isoformat(),
-            "experiment": "strategy_lab_0_to_o", "strategies": [item.strategy_id for item in self.STRATEGIES],
+            "experiment": "strategy_lab_0_to_p", "strategies": [item.strategy_id for item in self.STRATEGIES],
         }, indent=2), encoding="utf-8")
         return run_id
 
@@ -892,8 +923,8 @@ class PaperRuntime:
         except (OSError, json.JSONDecodeError):
             return
         strategy_ids = [item.strategy_id for item in self.STRATEGIES]
-        if metadata.get("strategies") != strategy_ids or metadata.get("experiment") != "strategy_lab_0_to_o":
-            metadata["experiment"] = "strategy_lab_0_to_o"
+        if metadata.get("strategies") != strategy_ids or metadata.get("experiment") != "strategy_lab_0_to_p":
+            metadata["experiment"] = "strategy_lab_0_to_p"
             metadata["strategies"] = strategy_ids
             metadata["strategy_catalog_updated_at"] = datetime.now(timezone.utc).isoformat()
             self.run_metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -902,7 +933,9 @@ class PaperRuntime:
         if inference.signal_id is None:
             return
         metadata = json.loads(self.run_metadata_path.read_text(encoding="utf-8"))
-        if metadata.get("last_signal_id") == inference.signal_id:
+        signal_key = f"{inference.model}:{inference.signal_id}"
+        recorded = metadata.get("last_signal_keys", [])
+        if signal_key in recorded:
             return
         row = {
             "run_id": self.run_id, "signal_id": inference.signal_id,
@@ -917,6 +950,7 @@ class PaperRuntime:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         metadata["last_signal_id"] = inference.signal_id
         metadata["last_signal_timestamp"] = row["timestamp"]
+        metadata["last_signal_keys"] = (recorded + [signal_key])[-100:]
         self.run_metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
@@ -952,6 +986,8 @@ class PaperRuntime:
                 ].reset_index(drop=True)
             latest = int(completed_m1.timestamp.iloc[-1]) if not completed_m1.empty else None
             new_bar = latest != self._last_bar
+            account_sources = getattr(self, "_account_source", {})
+            by_source: dict[str, LiveInference] = {}
             latest_time = (
                 pd.Timestamp(completed_m1.datetime_utc.iloc[-1])
                 if not completed_m1.empty and "datetime_utc" in completed_m1 else None
@@ -963,49 +999,64 @@ class PaperRuntime:
                 self._last_bar = latest
                 return
             if new_bar:
-                inference = self.engine.predict(completed_m1)
                 price_confirmed = False
                 lookback = 3
                 if len(completed_m1) > lookback and "high" in completed_m1:
                     recent_high = float(completed_m1.high.iloc[-1])
                     prior_high = float(completed_m1.high.iloc[-(lookback + 1):-1].max())
                     price_confirmed = recent_high > prior_high
-                self._inference = replace(
-                    inference, signal_id=latest, short_reversal_price_confirmed=price_confirmed,
-                ) if inference.available else inference
-                self._inferences = {name: self._inference for name in self.accounts}
+                engines = getattr(self, "engines", {getattr(self, "source_model_label", "primary"): self.engine})
+                for source_label, engine in engines.items():
+                    inference = engine.predict(completed_m1)
+                    by_source[source_label] = replace(
+                        inference, signal_id=latest, short_reversal_price_confirmed=price_confirmed,
+                    ) if inference.available else inference
+                self._inference = next(iter(by_source.values()))
+                self._inferences = {
+                    name: by_source[account_sources.get(name, next(iter(by_source)))] for name in self.accounts
+                }
                 self._market_context = self._m15_market_context(completed_m1)
                 self._last_bar = latest
-                if self._inference.available and hasattr(self, "run_metadata_path"):
-                    self._record_shared_signal(tick, self._inference)
-            if self._inference is not None:
-                allocation = self._meta_allocation(self._inference, getattr(self, "_market_context", None))
-                for account in self.accounts.values():
+                if hasattr(self, "run_metadata_path"):
+                    for inference in by_source.values():
+                        if inference.available:
+                            self._record_shared_signal(tick, inference)
+            if self._inferences:
+                for name, account in self.accounts.items():
                     if account.config.strategy_id != "O":
-                        account.process(tick, self._inference, getattr(self, "_market_context", None))
-                meta_account = next((account for account in self.accounts.values() if account.config.strategy_id == "O"), None)
-                if meta_account is not None:
+                        account.process(tick, self._inferences[name], getattr(self, "_market_context", None))
+                for meta_name, meta_account in self.accounts.items():
+                    if meta_account.config.strategy_id != "O":
+                        continue
+                    inference = self._inferences[meta_name]
+                    source_model = account_sources.get(meta_name)
+                    if source_model is None:
+                        source_model = next(iter(getattr(self, "engines", {"primary": self.engine})))
+                    allocation = self._meta_allocation(inference, getattr(self, "_market_context", None), source_model)
                     source_id = allocation["metadata"].get("meta_source_strategy")
-                    source = next((account for account in self.accounts.values() if account.config.strategy_id == source_id), None)
+                    source = next((
+                        account for name, account in self.accounts.items()
+                        if account.config.strategy_id == source_id and account_sources.get(name, source_model) == source_model
+                    ), None)
                     source_decision = source.snapshot().get("last_signal") if source is not None else None
                     allocation["metadata"]["meta_source_decision"] = source_decision
                     if allocation["entry_blocker"] is None and source_decision not in {"BUY", "SELL"}:
                         allocation["entry_blocker"] = (
                             f"meta allocator: source {source_id} did not open a new trade ({source_decision or 'N/D'})"
                         )
-                    if new_bar and self._inference.available:
+                    if new_bar and inference.available:
                         meta_account._record_event("META_ALLOCATION", tick, **allocation["metadata"])
                     meta_account.process(
-                        tick, self._inference, getattr(self, "_market_context", None),
+                        tick, inference, getattr(self, "_market_context", None),
                         entry_blocker=allocation["entry_blocker"],
                         entry_size_multiplier=allocation["weight"],
                         allocation_metadata=allocation["metadata"],
                         source_exit_policy=self._exit_policy_snapshot(source.config) if source is not None else None,
                     )
-                if self._inference.available and hasattr(self, "comparison_directory"):
+                if any(inference.available for inference in self._inferences.values()) and hasattr(self, "comparison_directory"):
                     # Export after a completed-M1 decision, not on every tick.
                     # Rewriting all CSVs on every UI refresh was avoidable disk IO.
-                    if new_bar:
+                    if new_bar and self.export_after_process:
                         self.write_strategy_exports()
 
     @staticmethod
@@ -1067,7 +1118,7 @@ class PaperRuntime:
         return min(0.0, current - peak)
 
     def _meta_allocation(
-        self, inference: LiveInference, market_context: dict[str, float | None] | None,
+        self, inference: LiveInference, market_context: dict[str, float | None] | None, source_model: str | None = None,
     ) -> dict[str, Any]:
         """Select one paper source using only fast, already-observed PnL.
 
@@ -1085,10 +1136,16 @@ class PaperRuntime:
             return {"entry_blocker": "meta allocator: inference unavailable", "weight": 1.0, "metadata": metadata}
         now = pd.Timestamp(inference.inference_time_utc)
         candidates: list[tuple[float, PaperAccount, dict[str, float | None]]] = []
-        for account in self.accounts.values():
+        for account_name, account in self.accounts.items():
+            account_sources = getattr(self, "_account_source", {})
+            if source_model is not None and account_sources.get(account_name, source_model) != source_model:
+                continue
             if account.config.strategy_id == "O":
                 continue
-            state = account.snapshot()
+            # process() already holds the runtime lock; copying a growing
+            # full ledger here for every M1 made historical replays needlessly
+            # quadratic without changing the allocation decision.
+            state = account.state
             if not state.get("running"):
                 continue
             pnl_5 = self._rolling_pnl_change(state, now, 5)
@@ -1204,7 +1261,7 @@ class PaperRuntime:
                 "model": name,
                 "run_id": getattr(self, "run_id", "N/D"),
                 "strategy_id": account.config.strategy_id,
-                "source_model": getattr(self, "source_model_label", "N/D"),
+                "source_model": getattr(self, "_account_source", {}).get(name, getattr(self, "source_model_label", "N/D")),
                 "status": "RUNNING" if state["running"] else "STOPPED",
                 "balance": state["balance"],
                 "equity": state["equity"],
@@ -1236,18 +1293,21 @@ class PaperRuntime:
         """Materialize small, analysis-ready CSVs; the dashboard need not render large ledgers."""
         destination = self.comparison_directory / "exports" / self.run_id
         destination.mkdir(parents=True, exist_ok=True)
-        for account in self.accounts.values():
+        summary_frame = self.comparison()
+        for name, account in self.accounts.items():
             state = account.snapshot()
-            folder = destination / f"{account.config.strategy_id}_{account.model.split('·', 1)[-1].strip().replace(' ', '_')}"
+            source_model = getattr(self, "_account_source", {}).get(name, getattr(self, "source_model_label", "model"))
+            safe_model = source_model.replace(" ", "_").replace("·", "")
+            folder = destination / f"{safe_model}_{account.config.strategy_id}_{account.model.split('·', 1)[-1].strip().replace(' ', '_')}"
             folder.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(state.get("trades", [])).to_csv(folder / "trades.csv", index=False)
             pd.DataFrame(state.get("positions", [])).to_csv(folder / "open_positions.csv", index=False)
             pd.DataFrame(state.get("events", [])).to_csv(folder / "events.csv", index=False)
             pd.DataFrame(state.get("portfolio_history", [])).to_csv(folder / "portfolio_history.csv", index=False)
-            pd.DataFrame([{
-                **self.comparison().set_index("strategy_id").loc[account.config.strategy_id].to_dict(),
-                "exported_at": datetime.now(timezone.utc).isoformat(),
-            }]).to_csv(folder / "summary.csv", index=False)
+            row = summary_frame.loc[summary_frame["model"].eq(name)].iloc[0].to_dict()
+            pd.DataFrame([{**row, "exported_at": datetime.now(timezone.utc).isoformat()}]).to_csv(
+                folder / "summary.csv", index=False,
+            )
         self.signals_frame().to_csv(destination / "signals_m1_shared.csv", index=False)
         self.comparison().to_csv(destination / "comparison_summary.csv", index=False)
         return destination
@@ -1259,7 +1319,7 @@ class PaperRuntime:
             self.run_id = f"al_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
             self.run_metadata_path.write_text(json.dumps({
                 "run_id": self.run_id, "created_at": started_at,
-                "experiment": "strategy_lab_0_to_o", "strategies": [item.strategy_id for item in self.STRATEGIES],
+                "experiment": "strategy_lab_0_to_p", "strategies": [item.strategy_id for item in self.STRATEGIES],
                 "reset_reason": "user_requested_clean_simultaneous_cohort",
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             self._run_started_at = pd.Timestamp(started_at)
@@ -1299,8 +1359,9 @@ class PaperRuntime:
             self.config = config
             for account in self.accounts.values():
                 account.update_config_preserving_history(self._config_for_account(config, account))
-            if isinstance(self.engine, LiveInferenceEngine):
-                self.engine.buy_threshold, self.engine.sell_threshold = config.buy_threshold, config.sell_threshold
+            for engine in self.engines.values():
+                if isinstance(engine, LiveInferenceEngine):
+                    engine.buy_threshold, engine.sell_threshold = config.buy_threshold, config.sell_threshold
 
     def close_all_for_session(self, tick: MarketTick) -> dict[str, int]:
         """Flatten all paper accounts at one observed virtual market tick."""
