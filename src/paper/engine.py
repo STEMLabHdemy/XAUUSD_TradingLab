@@ -60,6 +60,12 @@ class PaperConfig:
     short_entry_max_range_15m: float | None = None
     direction_lock_rearm_bars: int = 2
     probability_reversal_enabled: bool = True
+    # Optional ATR exits for explicitly-labelled technical research portfolios.
+    # They use only the completed current bar supplied by the indicator runtime.
+    atr_stop_multiple: float | None = None
+    atr_take_profit_multiple: float | None = None
+    atr_break_even_r: float | None = None
+    atr_trailing_multiple: float | None = None
 
     def validate(self) -> None:
         if self.starting_capital <= 0 or self.position_size_units <= 0 or self.leverage <= 0:
@@ -87,6 +93,9 @@ class PaperConfig:
         for value in (self.short_entry_max_prior_return_15m, self.short_entry_max_range_15m):
             if value is not None and value < 0:
                 raise ValueError("SHORT entry filters cannot be negative")
+        for value in (self.atr_stop_multiple, self.atr_take_profit_multiple, self.atr_break_even_r, self.atr_trailing_multiple):
+            if value is not None and value <= 0:
+                raise ValueError("ATR exit multiples must be positive when enabled")
         if min(
             self.short_protect_break_even_pnl, self.short_protect_lock_trigger_pnl,
             self.short_protect_lock_pnl, self.short_protect_trailing_trigger_pnl,
@@ -474,6 +483,49 @@ class PaperAccount:
                 changed += 1
         return changed
 
+    def _apply_atr_trailing(self, tick: MarketTick, market_context: dict[str, float | None] | None) -> int:
+        """Chandelier-style stop: never widens and activates only after +R."""
+        current_atr = (market_context or {}).get("atr_15")
+        if current_atr is None or float(current_atr) <= 0:
+            return 0
+        changed = 0
+        for position in self._positions():
+            multiple = position.get("atr_trailing_multiple")
+            risk = position.get("atr_stop_distance")
+            break_even_r = position.get("atr_break_even_r")
+            if multiple is None or risk is None or break_even_r is None:
+                continue
+            side = str(position["side"])
+            executable = tick.bid if side == "LONG" else tick.ask
+            if side == "LONG":
+                high = max(float(position.get("high_watermark", executable)), executable)
+                position["high_watermark"] = high
+                favorable = high - float(position["raw_entry_price"])
+                if favorable < float(risk) * float(break_even_r):
+                    continue
+                desired = max(float(position["entry_price"]), high - float(current_atr) * float(multiple))
+                old = position.get("stop_loss")
+                if old is None or desired > float(old):
+                    position["stop_loss"] = desired
+                else:
+                    continue
+            else:
+                low = min(float(position.get("low_watermark", executable)), executable)
+                position["low_watermark"] = low
+                favorable = float(position["raw_entry_price"]) - low
+                if favorable < float(risk) * float(break_even_r):
+                    continue
+                desired = min(float(position["entry_price"]), low + float(current_atr) * float(multiple))
+                old = position.get("stop_loss")
+                if old is None or desired < float(old):
+                    position["stop_loss"] = desired
+                else:
+                    continue
+            self._record_event("ATR_TRAIL", tick, trade_id=position["trade_id"], side=side,
+                               old_stop_loss=old, stop_loss=desired, atr=float(current_atr))
+            changed += 1
+        return changed
+
     def _open(
         self, side: str, tick: MarketTick, inference: LiveInference, reason: str,
         market_context: dict[str, float | None] | None = None, allocation_weight: float = 1.0,
@@ -484,8 +536,13 @@ class PaperAccount:
         raw = tick.ask if side == "LONG" else tick.bid
         price = raw + slip if side == "LONG" else raw - slip
         policy = source_exit_policy or {}
-        stop_distance = policy.get("stop_loss_price", self.config.stop_loss_price)
-        take_distance = policy.get("take_profit_price", self.config.take_profit_price)
+        atr_multiple = policy.get("atr_stop_multiple", self.config.atr_stop_multiple)
+        atr_value = (market_context or {}).get("atr_15")
+        atr_stop_distance = float(atr_value) * float(atr_multiple) if atr_multiple and atr_value else None
+        stop_distance = atr_stop_distance if atr_stop_distance is not None else policy.get("stop_loss_price", self.config.stop_loss_price)
+        atr_take_multiple = policy.get("atr_take_profit_multiple", self.config.atr_take_profit_multiple)
+        atr_take_distance = float(atr_value) * float(atr_take_multiple) if atr_take_multiple and atr_value else None
+        take_distance = atr_take_distance if atr_take_distance is not None else policy.get("take_profit_price", self.config.take_profit_price)
         stop = price - stop_distance if side == "LONG" and stop_distance else None
         stop = price + stop_distance if side == "SHORT" and stop_distance else stop
         take = price + take_distance if side == "LONG" and take_distance else None
@@ -498,13 +555,19 @@ class PaperAccount:
             "confidence": inference.probability_up, "spread": tick.spread, "stop_loss": stop,
             "take_profit": take, "entry_costs": (slip + self.config.commission_per_unit_per_side) * quantity,
             "model": self.model, "strategy_id": self.config.strategy_id, "run_id": self.state.get("run_id"),
-            "regime": "not_available", "expected_return": None, "reason": reason,
+            "regime": (market_context or {}).get("regime", "not_available"), "expected_return": None, "reason": reason,
             "signal_id": inference.signal_id,
             "allocation_weight": allocation_weight,
             "source_strategy_id": policy.get("strategy_id"),
             "exit_policy": policy or None,
             "entry_prior_return_15m_pct": (market_context or {}).get("prior_return_15m_pct"),
             "entry_range_15m_pct": (market_context or {}).get("range_15m_pct"),
+            "power": inference.power,
+            "atr_stop_distance": atr_stop_distance,
+            "atr_break_even_r": policy.get("atr_break_even_r", self.config.atr_break_even_r),
+            "atr_trailing_multiple": policy.get("atr_trailing_multiple", self.config.atr_trailing_multiple),
+            "high_watermark": raw if side == "LONG" else None,
+            "low_watermark": raw if side == "SHORT" else None,
         }
         self._positions().append(position)
         self.state["last_entry_time"] = position["entry_time"]
@@ -534,6 +597,8 @@ class PaperAccount:
             "entry_range_15m_pct": position.get("entry_range_15m_pct"),
             "allocation_weight": position.get("allocation_weight", 1.0),
             "source_strategy_id": position.get("source_strategy_id"),
+            "power": position.get("power"),
+            "entry_regime": position.get("regime", "not_available"),
         }
         self.state["trades"].append(row)
         self.state["events"].append({**row, "event": "EXIT", "timestamp": row["exit_time"], "price": exit_price})
@@ -571,6 +636,7 @@ class PaperAccount:
                 self.close_all_for_session(tick)
                 return
             smart_updates = self._apply_smart_short_protection(tick)
+            smart_updates += self._apply_atr_trailing(tick, market_context)
             protective_exits = 0
             for position in list(self._positions()):
                 if position["side"] == "LONG" and position["stop_loss"] is not None and tick.bid <= position["stop_loss"]:

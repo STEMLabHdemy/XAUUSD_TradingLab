@@ -27,6 +27,9 @@ class LiveInference:
     # Set by PaperRuntime from the completed M1 series.  It is deliberately
     # shared by every ledger, just like the model probabilities.
     short_reversal_price_confirmed: bool | None = None
+    # Technical-paper portfolios use this as a normalized, entry-time-only
+    # measure of setup quality.  Model portfolios deliberately leave it empty.
+    power: float | None = None
 
 
 class LiveInferenceEngine:
