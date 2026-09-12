@@ -153,6 +153,17 @@ def research_leaderboard() -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"Snapshot ricerca non leggibile: {exc}") from exc
 
 
+@app.get("/api/research/validation")
+def research_validation() -> dict[str, Any]:
+    base = ROOT / "results" / "continuous_structure_search"
+    try:
+        payload = json.loads((base / "validation.json").read_text(encoding="utf-8")) if (base / "validation.json").exists() else {"results": [], "validated": 0}
+        payload["status"] = json.loads((base / "validation_status.json").read_text(encoding="utf-8")) if (base / "validation_status.json").exists() else {"message": "validazione non ancora avviata"}
+        return payload
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"Snapshot validazione non leggibile: {exc}") from exc
+
+
 @app.get("/api/research/details/{candidate_id}")
 def research_candidate_details(candidate_id: str) -> dict[str, Any]:
     """Replay one ranked configuration and cache its auditable chart payload."""
