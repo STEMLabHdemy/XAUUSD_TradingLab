@@ -8,7 +8,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-STATUS = ROOT / "data/live/paper/comparison_v1/headless_status.json"
+STATUS = ROOT / "data/live/paper/structure_v1/headless_status.json"
 LOG = ROOT / "logs/paper_headless.stdout.log"
 ERR = ROOT / "logs/paper_headless.stderr.log"
 
@@ -21,6 +21,11 @@ def fresh() -> bool:
         return False
 
 def start() -> None:
+    # The status heartbeat is authoritative.  This watchdog used to point to
+    # the deleted comparison_v1 folder, considered every healthy process dead,
+    # and spawned a new paper loop every ~20 seconds.
+    if fresh():
+        return
     LOG.parent.mkdir(parents=True,exist_ok=True)
     with LOG.open("a",encoding="utf-8") as out, ERR.open("a",encoding="utf-8") as err:
         subprocess.Popen([sys.executable,"-m","src.paper.headless","--project-root",str(ROOT),"--interval-seconds","0.5"],cwd=ROOT,stdout=out,stderr=err,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))

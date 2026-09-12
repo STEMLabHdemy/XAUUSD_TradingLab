@@ -1,7 +1,7 @@
 """Isolated historical research runner.  It never reads or writes paper ledgers."""
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Callable
 import json
@@ -190,12 +190,19 @@ def run_lab(
     # Only test requested interval; earlier rows only supplied causal warm-up.
     selected = pd.to_datetime(features.datetime_utc, utc=True).between(start_ts, end_ts)
     base = features.loc[selected].copy().reset_index(drop=True)
+    # I42 has a fixed execution policy.  Generic fixed SL/TP controls used to
+    # test another system altogether, rather than the live paper strategy.
+    strategy_config = replace(
+        config, stop_loss_price=None, take_profit_price=None,
+        max_holding_minutes=None, max_daily_trades=3, cooldown_minutes=10,
+        atr_stop_multiple=1.5, atr_break_even_r=1.0, atr_trailing_multiple=2.5,
+    )
     results: dict[str, object] = {}
     for number, strategy_id in enumerate(strategies, start=1):
         data = base.copy()
         data["signal"] = signals.loc[selected, strategy_id].to_numpy()
-        outcome = Backtester(config).run(data)
-        metrics = performance_metrics(outcome.trades, outcome.equity_curve, config.starting_capital)
+        outcome = Backtester(strategy_config).run(data)
+        metrics = performance_metrics(outcome.trades, outcome.equity_curve, strategy_config.starting_capital)
         results[strategy_id] = {
             "name": catalog[strategy_id], "metrics": metrics,
             "trades": _records(outcome.trades),
@@ -207,6 +214,6 @@ def run_lab(
     candles = [{"time": int(pd.Timestamp(r.datetime_utc).timestamp()), "open": float(r.mid_open), "high": float(r.mid_high),
                 "low": float(r.mid_low), "close": float(r.mid_close), "volume": float(getattr(r, "tick_volume", 0.0))}
                for r in chart_bars.itertuples(index=False)]
-    return {"start": start_ts.isoformat(), "end": end_ts.isoformat(), "bars": int(len(base)), "config": asdict(config),
+    return {"start": start_ts.isoformat(), "end": end_ts.isoformat(), "bars": int(len(base)), "config": asdict(strategy_config),
             "results": results, "candles": candles,
             "assumption": "Segnale su candela chiusa, ingresso alla candela M1 successiva. Se SL e TP sono entrambi toccati nella stessa candela, lo stop (esito avverso) ha priorità."}

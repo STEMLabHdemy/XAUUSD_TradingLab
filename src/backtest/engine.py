@@ -16,6 +16,11 @@ class BacktestConfig:
     stop_loss_price: float | None = 5.0
     take_profit_price: float | None = 10.0
     max_holding_minutes: int | None = 30
+    max_daily_trades: int | None = None
+    cooldown_minutes: int = 0
+    atr_stop_multiple: float | None = None
+    atr_break_even_r: float | None = None
+    atr_trailing_multiple: float | None = None
 
 
 @dataclass
@@ -39,6 +44,11 @@ class _Position:
     session: str | None
     trend_regime: str | None
     volatility_regime: str | None
+    atr_stop_distance: float | None = None
+    atr_break_even_r: float | None = None
+    atr_trailing_multiple: float | None = None
+    high_watermark: float | None = None
+    low_watermark: float | None = None
 
 
 class Backtester:
@@ -53,6 +63,8 @@ class Backtester:
         self.config = config or BacktestConfig()
         if self.config.starting_capital <= 0 or self.config.position_size_units <= 0:
             raise ValueError("Capital and position size must be positive")
+        if self.config.cooldown_minutes < 0 or (self.config.max_daily_trades is not None and self.config.max_daily_trades < 1):
+            raise ValueError("Cooldown non valido o limite giornaliero inferiore a uno")
 
     def run(self, data: pd.DataFrame) -> BacktestResult:
         missing = self.REQUIRED.difference(data.columns)
@@ -67,12 +79,14 @@ class Backtester:
         trade_rows: list[dict[str, object]] = []
         equity_rows: list[dict[str, object]] = []
         next_trade_id = 1
+        entry_count_by_day: dict[object, int] = {}
+        last_exit_time: pd.Timestamp | None = None
         quantity = self.config.position_size_units
         slip = self.config.slippage_price_per_side
         commission_round_trip = 2 * self.config.commission_per_unit_per_side * quantity
 
         def close_position(row: pd.Series, raw_exit: float, exit_reason: str, exit_time: pd.Timestamp) -> None:
-            nonlocal position, balance
+            nonlocal position, balance, last_exit_time
             assert position is not None
             direction = 1 if position.side == "LONG" else -1
             exit_price = raw_exit - slip if position.side == "LONG" else raw_exit + slip
@@ -95,6 +109,7 @@ class Backtester:
                 "volatility_regime": position.volatility_regime,
             })
             position = None
+            last_exit_time = exit_time
 
         for index, row in bars.iterrows():
             timestamp = pd.Timestamp(row.datetime_utc)
@@ -103,19 +118,29 @@ class Backtester:
                 raw_exit = float(row.open_bid if position.side == "LONG" else row.open_ask)
                 close_position(row, raw_exit, pending_reason, timestamp)
             elif pending_signal in {"BUY", "SELL"} and position is None and executable:
-                side = "LONG" if pending_signal == "BUY" else "SHORT"
-                raw_entry = float(row.open_ask if side == "LONG" else row.open_bid)
-                entry_price = raw_entry + slip if side == "LONG" else raw_entry - slip
-                stop = entry_price - self.config.stop_loss_price if side == "LONG" and self.config.stop_loss_price else None
-                stop = entry_price + self.config.stop_loss_price if side == "SHORT" and self.config.stop_loss_price else stop
-                take = entry_price + self.config.take_profit_price if side == "LONG" and self.config.take_profit_price else None
-                take = entry_price - self.config.take_profit_price if side == "SHORT" and self.config.take_profit_price else take
-                position = _Position(
-                    next_trade_id, side, timestamp, raw_entry, entry_price,
-                    pending_confidence, float(row.open_ask - row.open_bid),
-                    stop, take, index, row.get("session"), row.get("trend_regime"), row.get("volatility_regime"),
-                )
-                next_trade_id += 1
+                local_day = timestamp.tz_convert("Europe/Rome").date()
+                allowed_today = self.config.max_daily_trades is None or entry_count_by_day.get(local_day, 0) < self.config.max_daily_trades
+                cooled_down = last_exit_time is None or timestamp >= last_exit_time + pd.Timedelta(minutes=self.config.cooldown_minutes)
+                if allowed_today and cooled_down:
+                    side = "LONG" if pending_signal == "BUY" else "SHORT"
+                    raw_entry = float(row.open_ask if side == "LONG" else row.open_bid)
+                    entry_price = raw_entry + slip if side == "LONG" else raw_entry - slip
+                    atr_value = float(row.get("atr_15", np.nan))
+                    atr_distance = (atr_value * self.config.atr_stop_multiple if self.config.atr_stop_multiple and np.isfinite(atr_value) and atr_value > 0 else None)
+                    stop_distance = atr_distance if atr_distance is not None else self.config.stop_loss_price
+                    stop = entry_price - stop_distance if side == "LONG" and stop_distance else None
+                    stop = entry_price + stop_distance if side == "SHORT" and stop_distance else stop
+                    take = entry_price + self.config.take_profit_price if side == "LONG" and self.config.take_profit_price else None
+                    take = entry_price - self.config.take_profit_price if side == "SHORT" and self.config.take_profit_price else take
+                    position = _Position(
+                        next_trade_id, side, timestamp, raw_entry, entry_price,
+                        pending_confidence, float(row.open_ask - row.open_bid),
+                        stop, take, index, row.get("session"), row.get("trend_regime"), row.get("volatility_regime"),
+                        atr_distance, self.config.atr_break_even_r, self.config.atr_trailing_multiple,
+                        raw_entry if side == "LONG" else None, raw_entry if side == "SHORT" else None,
+                    )
+                    entry_count_by_day[local_day] = entry_count_by_day.get(local_day, 0) + 1
+                    next_trade_id += 1
             pending_signal = None
 
             if position is not None:
@@ -128,6 +153,8 @@ class Backtester:
                     elif take_hit:
                         raw = max(float(row.open_bid), position.take_profit) if float(row.open_bid) > position.take_profit else position.take_profit
                         close_position(row, raw, "take_profit", timestamp)
+                    elif position is not None:
+                        self._tighten_atr_trail(position, float(row.high_bid), float(row.get("atr_15", np.nan)))
                 elif position.side == "SHORT" and pd.notna(row.high_ask) and pd.notna(row.low_ask):
                     stop_hit = position.stop_loss is not None and float(row.high_ask) >= position.stop_loss
                     take_hit = position.take_profit is not None and float(row.low_ask) <= position.take_profit
@@ -137,6 +164,8 @@ class Backtester:
                     elif take_hit:
                         raw = min(float(row.open_ask), position.take_profit) if float(row.open_ask) < position.take_profit else position.take_profit
                         close_position(row, raw, "take_profit", timestamp)
+                    elif position is not None:
+                        self._tighten_atr_trail(position, float(row.low_ask), float(row.get("atr_15", np.nan)))
 
             signal = str(row.signal)
             if position is not None and self.config.max_holding_minutes is not None:
@@ -171,3 +200,29 @@ class Backtester:
             equity_rows[-1]["in_position"] = 0
 
         return BacktestResult(pd.DataFrame(trade_rows), pd.DataFrame(equity_rows))
+
+    @staticmethod
+    def _tighten_atr_trail(position: _Position, favorable_price: float, atr: float) -> None:
+        """Apply a chandelier stop only after this candle's stop test.
+
+        That ordering is deliberately conservative with M1 OHLC data: a high
+        cannot retroactively tighten a long stop before the same candle's low.
+        The updated stop is active from the following minute onward.
+        """
+        if (position.atr_stop_distance is None or position.atr_break_even_r is None
+                or position.atr_trailing_multiple is None or not np.isfinite(atr) or atr <= 0):
+            return
+        if position.side == "LONG":
+            position.high_watermark = max(float(position.high_watermark or favorable_price), favorable_price)
+            if position.high_watermark - position.raw_entry_price < position.atr_stop_distance * position.atr_break_even_r:
+                return
+            desired = max(position.entry_price, position.high_watermark - atr * position.atr_trailing_multiple)
+            if position.stop_loss is None or desired > position.stop_loss:
+                position.stop_loss = desired
+        else:
+            position.low_watermark = min(float(position.low_watermark or favorable_price), favorable_price)
+            if position.raw_entry_price - position.low_watermark < position.atr_stop_distance * position.atr_break_even_r:
+                return
+            desired = min(position.entry_price, position.low_watermark + atr * position.atr_trailing_multiple)
+            if position.stop_loss is None or desired < position.stop_loss:
+                position.stop_loss = desired

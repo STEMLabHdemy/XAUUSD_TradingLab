@@ -44,7 +44,9 @@ def _m15_structure(bars: pd.DataFrame, reversal_atr: float = 1.25) -> pd.DataFra
         trend.append("UP" if up else "DOWN" if down else "RANGE")
         last_high.append(highs[-1] if highs else np.nan); last_low.append(lows[-1] if lows else np.nan)
     m15["structure_trend"] = trend; m15["swing_high"] = last_high; m15["swing_low"] = last_low
-    return m15[["structure_trend", "swing_high", "swing_low", "atr"]]
+    # Keep the completed M15 OHLC here too: the entry rule below must be
+    # evaluated on a finished M15 candle, never on an evolving M1 fragment.
+    return m15[["high", "low", "close", "structure_trend", "swing_high", "swing_low", "atr"]]
 
 
 def structure_signals(bars: pd.DataFrame) -> pd.DataFrame:
@@ -52,24 +54,34 @@ def structure_signals(bars: pd.DataFrame) -> pd.DataFrame:
     features = FeatureEngine().transform(bars).copy()
     structural = _m15_structure(features)
     timed = pd.to_datetime(features.datetime_utc, utc=True)
+    # The prior M1 implementation was too permissive: every tiny 3-minute
+    # bounce could become a trade.  Structure and pullback confirmation now
+    # both happen on completed M15 candles; M1 is only the execution clock.
+    m15 = structural
+    e20 = m15.close.ewm(span=20, adjust=False).mean()
+    recent_touch_long = m15.low.le(e20 + .15*m15.atr).rolling(3).max().shift(1).fillna(0).astype(bool)
+    recent_touch_short = m15.high.ge(e20 - .15*m15.atr).rolling(3).max().shift(1).fillna(0).astype(bool)
+    recover_long = m15.close.gt(m15.high.shift(1).rolling(2).max()) & m15.close.gt(e20)
+    recover_short = m15.close.lt(m15.low.shift(1).rolling(2).min()) & m15.close.lt(e20)
+    safe_long = m15.swing_low.notna() & m15.close.gt(m15.swing_low + .30*m15.atr)
+    safe_short = m15.swing_high.notna() & m15.close.lt(m15.swing_high - .30*m15.atr)
+    long_m15 = m15.structure_trend.eq("UP") & recent_touch_long & recover_long & safe_long
+    short_m15 = m15.structure_trend.eq("DOWN") & recent_touch_short & recover_short & safe_short
+    # An entry is an event, not a persistent state.  One M15 recovery can
+    # generate at most one candidate trade.
+    long_m15 &= ~long_m15.shift(1, fill_value=False)
+    short_m15 &= ~short_m15.shift(1, fill_value=False)
+    event = pd.DataFrame({"long": long_m15, "short": short_m15, "trend": m15.structure_trend,
+                          "swing_high": m15.swing_high, "swing_low": m15.swing_low, "atr": m15.atr}).reindex(timed)
     lookup = structural.reindex(timed, method="ffill").reset_index(drop=True)
-    close, high, low = features.mid_close, features.mid_high, features.mid_low
-    ema20 = close.ewm(span=20, adjust=False).mean(); atr = features.atr_15
-    # A pullback must touch the local mean, then recover through the previous
-    # three-minute high/low; this avoids buying a fall that is still falling.
-    pullback_long = low.rolling(6).min().le(ema20 + .12 * atr)
-    pullback_short = high.rolling(6).max().ge(ema20 - .12 * atr)
-    recover_long = close.gt(high.shift(1).rolling(3).max()) & close.gt(ema20)
-    recover_short = close.lt(low.shift(1).rolling(3).min()) & close.lt(ema20)
-    safe_long = lookup.swing_low.notna() & close.gt(lookup.swing_low + .30 * atr)
-    safe_short = lookup.swing_high.notna() & close.lt(lookup.swing_high - .30 * atr)
-    long = lookup.structure_trend.eq("UP") & pullback_long & recover_long & safe_long
-    short = lookup.structure_trend.eq("DOWN") & pullback_short & recover_short & safe_short
+    close = features.mid_close; atr = features.atr_15
+    long = event["long"].fillna(False).to_numpy(dtype=bool)
+    short = event["short"].fillna(False).to_numpy(dtype=bool)
     signal = pd.Series("HOLD", index=features.index)
     signal.loc[long] = "BUY"; signal.loc[short] = "SELL"
     distance = pd.Series(np.nan, index=features.index)
-    distance.loc[long] = (close.loc[long] - lookup.swing_low.loc[long]) / atr.loc[long]
-    distance.loc[short] = (lookup.swing_high.loc[short] - close.loc[short]) / atr.loc[short]
+    distance.loc[long] = (close.loc[long] - event.swing_low.loc[long].to_numpy()) / atr.loc[long]
+    distance.loc[short] = (event.swing_high.loc[short].to_numpy() - close.loc[short]) / atr.loc[short]
     power = (distance.clip(0, 2.5) / 2.5 * 100).where(signal.ne("HOLD"))
     output = features[["datetime_utc", "timestamp", "mid_open", "mid_high", "mid_low", "mid_close", "spread_close"]].copy()
     output["signal"] = signal; output["power"] = power; output["structure_trend"] = lookup.structure_trend
