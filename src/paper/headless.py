@@ -11,37 +11,19 @@ import time
 import yaml
 
 from src.live import LiveMarketService
-from src.paper.engine import PaperConfig, PaperRuntime
+from src.paper.engine import PaperConfig
 from src.paper.indicator_runtime import IndicatorPaperRuntime
 
 
-def _write_status(path: Path, runtime: PaperRuntime, *, message: str) -> None:
+def _write_status(path: Path, run_id: str, *, message: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "pid": __import__("os").getpid(),
         "updated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "run_id": runtime.run_id,
+        "run_id": run_id,
         "mode": "headless",
         "message": message,
     }
-    inference = getattr(runtime, "_inference", None)
-    if inference is not None:
-        # Cost-aware execution deliberately maps the winning class to .40/.50/.60.
-        # The dashboard must instead show the genuine three-class UP probability.
-        display_up = inference.probability_up
-        if inference.probability_down is not None and inference.probability_neutral is not None:
-            display_up = max(0.0, 1.0 - inference.probability_down - inference.probability_neutral)
-        payload["inference"] = {
-            "available": inference.available,
-            "candidate": inference.candidate,
-            "final_signal": inference.final_signal,
-            "probability_down": inference.probability_down,
-            "probability_neutral": inference.probability_neutral,
-            "probability_up": display_up,
-            "horizon_minutes": inference.horizon_minutes,
-            "timestamp": inference.inference_time_utc.isoformat() if inference.inference_time_utc is not None else None,
-            "reason": inference.reason,
-        }
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
@@ -50,26 +32,24 @@ def _write_status(path: Path, runtime: PaperRuntime, *, message: str) -> None:
 def run(project_root: Path, interval_seconds: float) -> None:
     values = yaml.safe_load((project_root / "configs/paper.yaml").read_text(encoding="utf-8")) or {}
     service = LiveMarketService(project_root)
-    runtime = PaperRuntime(project_root, PaperConfig(**values))
     indicators = IndicatorPaperRuntime(project_root, PaperConfig(**values))
-    status_path = project_root / "data/live/paper/comparison_v1/headless_status.json"
-    print(f"Paper headless attivo. Run: {runtime.run_id}. Premi Ctrl+C per fermarlo.", flush=True)
+    status_path = project_root / "data/live/paper/structure_v1/headless_status.json"
+    print(f"Paper struttura attivo. Run: {indicators.run_id}. Premi Ctrl+C per fermarlo.", flush=True)
     try:
         while True:
             try:
                 snapshot = service.poll()
                 completed = snapshot.m1_bars[snapshot.m1_bars.is_complete.astype(bool)].reset_index(drop=True)
-                runtime.process(snapshot.tick, completed)
                 indicators.process(snapshot.tick, completed)
-                _write_status(status_path, runtime, message="MT5 connesso; paper engine attivo")
+                _write_status(status_path, indicators.run_id, message="MT5 connesso; struttura paper attiva")
             except Exception as exc:  # The loop survives MT5 temporary outages.
-                _write_status(status_path, runtime, message=f"in attesa MT5: {exc}")
+                _write_status(status_path, indicators.run_id, message=f"in attesa MT5: {exc}")
                 print(f"MT5/paper temporaneamente non disponibile: {exc}", flush=True)
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
         print("Paper headless arrestato dall'utente.", flush=True)
     finally:
-        _write_status(status_path, runtime, message="paper engine fermo")
+        _write_status(status_path, indicators.run_id, message="paper struttura fermo")
 
 
 def main() -> int:

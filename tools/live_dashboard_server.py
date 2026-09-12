@@ -54,14 +54,14 @@ def _load_ledger_states() -> tuple[str, dict[str, dict[str, Any]]]:
 
 
 def _load_indicator_states() -> tuple[str, dict[str, dict[str, Any]]]:
-    directory = ROOT / "data" / "live" / "paper" / "indicator_v1"
+    directory = ROOT / "data" / "live" / "paper" / "structure_v1"
     metadata = json.loads((directory / "run.json").read_text(encoding="utf-8"))
     run_id = str(metadata["run_id"])
     states = {}
-    for path in directory.glob("indicator_v1_*/state.json"):
+    for path in directory.glob("structure_v1_*/state.json"):
         state = json.loads(path.read_text(encoding="utf-8"))
         strategy_id = str(state.get("config", {}).get("strategy_id", ""))
-        if state.get("run_id") == run_id and strategy_id.startswith("I"):
+        if state.get("run_id") == run_id and strategy_id == "I42":
             states[str(state["model"])] = state
     return run_id, states
 
@@ -108,7 +108,7 @@ def _latest_inference() -> dict[str, Any] | None:
 
 def _paper_status() -> dict[str, Any] | None:
     try:
-        return json.loads((_paper_directory / "headless_status.json").read_text(encoding="utf-8"))
+        return json.loads((ROOT / "data/live/paper/structure_v1/headless_status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -119,7 +119,7 @@ def _number(value: Any) -> float | None:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC / "indicators.html")
 
 
 @app.get("/indicators")

@@ -13,15 +13,13 @@ import pandas as pd
 from src.data.market_hours import live_session_open_mask
 from src.features import FeatureEngine
 from src.paper.indicator_runtime import IndicatorPaperRuntime
+from src.signals.structure import structure_signals
 from .engine import BacktestConfig, Backtester
 from .metrics import performance_metrics
 
 
-MODEL_BASELINE = "MODEL_XGB"
-
-
 def strategy_catalog() -> dict[str, str]:
-    return {**IndicatorPaperRuntime.SPECS, MODEL_BASELINE: "MODEL · XGBoost baseline"}
+    return dict(IndicatorPaperRuntime.SPECS)
 
 
 def load_history(root: Path, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
@@ -185,10 +183,10 @@ def run_lab(
         raise ValueError("Periodo troppo breve: servono almeno 300 candele M1")
     features = FeatureEngine().transform(bars)
     if progress: progress(.10)
-    indicator_ids = [item for item in strategies if item != MODEL_BASELINE]
-    signals = _indicator_signals(features, indicator_ids, progress) if indicator_ids else pd.DataFrame(index=features.index)
-    if MODEL_BASELINE in strategies:
-        signals[MODEL_BASELINE] = _model_signal(features, root, buy_threshold, sell_threshold)
+    # I42 is intentionally the only research system.  The same causal signal
+    # builder feeds historical testing and live paper execution.
+    signals = structure_signals(bars)[["signal"]].rename(columns={"signal": "I42"})
+    if progress: progress(.75)
     # Only test requested interval; earlier rows only supplied causal warm-up.
     selected = pd.to_datetime(features.datetime_utc, utc=True).between(start_ts, end_ts)
     base = features.loc[selected].copy().reset_index(drop=True)
