@@ -22,7 +22,10 @@ if str(ROOT) not in sys.path:
 
 from src.live.mt5_client import MT5Client
 from src.backtest import BacktestConfig
-from src.backtest.lab import run_lab, strategy_catalog
+from src.backtest.lab import run_lab, strategy_catalog, load_history
+from src.backtest.engine import Backtester
+from src.features import FeatureEngine
+from src.signals.structure import structure_signals
 
 
 STATIC = ROOT / "web" / "static"
@@ -148,6 +151,55 @@ def research_leaderboard() -> dict[str, Any]:
         return payload
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=503, detail=f"Snapshot ricerca non leggibile: {exc}") from exc
+
+
+@app.get("/api/research/details/{candidate_id}")
+def research_candidate_details(candidate_id: str) -> dict[str, Any]:
+    """Replay one ranked configuration and cache its auditable chart payload."""
+    base_dir = ROOT / "results" / "continuous_structure_search"
+    cached = base_dir / "details" / f"{candidate_id}.json"
+    try:
+        if cached.exists():
+            return json.loads(cached.read_text(encoding="utf-8"))
+        board = json.loads((base_dir / "leaderboard.json").read_text(encoding="utf-8"))
+        candidate = next(item for item in board.get("leaderboard", []) if item["id"] == candidate_id)
+        params = candidate["params"]
+        period = board["period"]
+        start, end = pd.Timestamp(period["start"]), pd.Timestamp(period["end"])
+        bars = load_history(ROOT, start, end)
+        features = FeatureEngine().transform(bars)
+        selected = pd.to_datetime(features.datetime_utc, utc=True).between(start, end)
+        data = features.loc[selected].copy().reset_index(drop=True)
+        signals = structure_signals(bars, **{key: params[key] for key in (
+            "reversal_atr", "ema_span", "touch_atr", "touch_lookback", "breakout_lookback", "swing_buffer_atr")})
+        data["signal"] = signals.loc[selected, "signal"].to_numpy()
+        config = BacktestConfig(stop_loss_price=None, take_profit_price=None, max_holding_minutes=None,
+            max_daily_trades=int(params["max_daily_trades"]), cooldown_minutes=10,
+            atr_stop_multiple=float(params["atr_stop_multiple"]), atr_break_even_r=float(params["atr_break_even_r"]),
+            atr_trailing_multiple=float(params["atr_trailing_multiple"]))
+        outcome = Backtester(config).run(data)
+        def records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+            result = frame.copy()
+            for column in result.columns:
+                if "time" in str(column):
+                    values = pd.to_datetime(result[column], utc=True, errors="coerce")
+                    if values.notna().any(): result[column] = values.map(lambda value: value.isoformat() if pd.notna(value) else None)
+            return _json_safe(result.to_dict("records"))
+        candles = [{"time": int(pd.Timestamp(row.datetime_utc).timestamp()), "open": float(row.mid_open),
+                    "high": float(row.mid_high), "low": float(row.mid_low), "close": float(row.mid_close),
+                    "volume": float(getattr(row, "tick_volume", 0.0))} for row in data.itertuples(index=False)]
+        payload = {"candidate": candidate, "candles": candles, "trades": records(outcome.trades),
+                   "equity": records(outcome.equity_curve[["datetime_utc", "equity"]])}
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cached.with_name(f"{cached.stem}.{uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(cached)
+        return payload
+    except StopIteration as exc:
+        raise HTTPException(status_code=404, detail="Candidato non più nella top 100") from exc
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=503, detail=f"Replay candidato fallito: {exc}") from exc
 
 
 @app.get("/api/backtests/catalog")
