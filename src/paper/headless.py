@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import time
 
@@ -24,7 +25,9 @@ def _write_status(path: Path, run_id: str, *, message: str) -> None:
         "mode": "headless",
         "message": message,
     }
-    temporary = path.with_suffix(".tmp")
+    # A process-specific temporary name avoids a stale duplicate process (or a
+    # just-restarted watchdog) colliding with the current writer on Windows.
+    temporary = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
 
