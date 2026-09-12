@@ -132,6 +132,24 @@ def backtest_page() -> FileResponse:
     return FileResponse(STATIC / "backtest.html")
 
 
+@app.get("/research")
+def research_page() -> FileResponse:
+    return FileResponse(STATIC / "research.html")
+
+
+@app.get("/api/research/leaderboard")
+def research_leaderboard() -> dict[str, Any]:
+    """Read-only snapshot written by the continuous local search process."""
+    target = ROOT / "results" / "continuous_structure_search" / "leaderboard.json"
+    status = ROOT / "results" / "continuous_structure_search" / "status.json"
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {"leaderboard": [], "tested": 0}
+        payload["status"] = json.loads(status.read_text(encoding="utf-8")) if status.exists() else {"message": "ricerca non ancora avviata"}
+        return payload
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"Snapshot ricerca non leggibile: {exc}") from exc
+
+
 @app.get("/api/backtests/catalog")
 def backtest_catalog() -> dict[str, Any]:
     return {"strategies": [{"id": key, "name": value} for key, value in strategy_catalog().items()],

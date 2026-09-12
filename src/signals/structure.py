@@ -49,22 +49,26 @@ def _m15_structure(bars: pd.DataFrame, reversal_atr: float = 1.25) -> pd.DataFra
     return m15[["high", "low", "close", "structure_trend", "swing_high", "swing_low", "atr"]]
 
 
-def structure_signals(bars: pd.DataFrame) -> pd.DataFrame:
+def structure_signals(
+    bars: pd.DataFrame, *, reversal_atr: float = 1.25, ema_span: int = 20,
+    touch_atr: float = .15, touch_lookback: int = 3, breakout_lookback: int = 2,
+    swing_buffer_atr: float = .30,
+) -> pd.DataFrame:
     """Return one causal I42 decision per M1 row, plus diagnostics for audit."""
     features = FeatureEngine().transform(bars).copy()
-    structural = _m15_structure(features)
+    structural = _m15_structure(features, reversal_atr=reversal_atr)
     timed = pd.to_datetime(features.datetime_utc, utc=True)
     # The prior M1 implementation was too permissive: every tiny 3-minute
     # bounce could become a trade.  Structure and pullback confirmation now
     # both happen on completed M15 candles; M1 is only the execution clock.
     m15 = structural
-    e20 = m15.close.ewm(span=20, adjust=False).mean()
-    recent_touch_long = m15.low.le(e20 + .15*m15.atr).rolling(3).max().shift(1).fillna(0).astype(bool)
-    recent_touch_short = m15.high.ge(e20 - .15*m15.atr).rolling(3).max().shift(1).fillna(0).astype(bool)
-    recover_long = m15.close.gt(m15.high.shift(1).rolling(2).max()) & m15.close.gt(e20)
-    recover_short = m15.close.lt(m15.low.shift(1).rolling(2).min()) & m15.close.lt(e20)
-    safe_long = m15.swing_low.notna() & m15.close.gt(m15.swing_low + .30*m15.atr)
-    safe_short = m15.swing_high.notna() & m15.close.lt(m15.swing_high - .30*m15.atr)
+    e20 = m15.close.ewm(span=ema_span, adjust=False).mean()
+    recent_touch_long = m15.low.le(e20 + touch_atr*m15.atr).rolling(touch_lookback).max().shift(1).fillna(0).astype(bool)
+    recent_touch_short = m15.high.ge(e20 - touch_atr*m15.atr).rolling(touch_lookback).max().shift(1).fillna(0).astype(bool)
+    recover_long = m15.close.gt(m15.high.shift(1).rolling(breakout_lookback).max()) & m15.close.gt(e20)
+    recover_short = m15.close.lt(m15.low.shift(1).rolling(breakout_lookback).min()) & m15.close.lt(e20)
+    safe_long = m15.swing_low.notna() & m15.close.gt(m15.swing_low + swing_buffer_atr*m15.atr)
+    safe_short = m15.swing_high.notna() & m15.close.lt(m15.swing_high - swing_buffer_atr*m15.atr)
     long_m15 = m15.structure_trend.eq("UP") & recent_touch_long & recover_long & safe_long
     short_m15 = m15.structure_trend.eq("DOWN") & recent_touch_short & recover_short & safe_short
     # An entry is an event, not a persistent state.  One M15 recovery can
