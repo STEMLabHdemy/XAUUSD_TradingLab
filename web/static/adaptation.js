@@ -33,8 +33,17 @@ function render(){
   // marker API requires unique times, so retain one explicit marker and show
   // the number of additional events in that same visual bar.
   const grouped=new Map();
-  rawMarkers.forEach(marker=>{let group=grouped.get(marker.time);if(!group){group={...marker,count:0};grouped.set(marker.time,group)}group.count++});
-  const markerRows=[...grouped.values()].map(marker=>({...marker,text:marker.count>1?`${marker.text} ×${marker.count}`:marker.text}));
+  rawMarkers.forEach(marker=>{
+    let group=grouped.get(marker.time);
+    if(!group){group={...marker,entries:[],exits:0};grouped.set(marker.time,group)}
+    if(marker.text==='EXIT')group.exits++;else group.entries.push(marker.text);
+  });
+  const markerRows=[...grouped.values()].map(marker=>{
+    const entryCount=marker.entries.length, entryLabel=entryCount ? `${marker.entries[0]}${entryCount>1?` ×${entryCount}`:''}` : '';
+    const exitLabel=marker.exits ? `EXIT${marker.exits>1?` ×${marker.exits}`:''}` : '';
+    const text=[entryLabel,exitLabel].filter(Boolean).join(' · ');
+    return {...marker,text,position:entryCount?'belowBar':'aboveBar',shape:entryCount?(marker.entries[0]==='BUY'?'arrowUp':'arrowDown'):'circle',color:entryCount?(marker.entries[0]==='BUY'?'#22c55e':'#ef4444'):'#f59e0b'};
+  });
   marks.setMarkers(markerRows);
   es.setData(visualLine(payload.adaptive.equity,cut));bs.setData(visualLine(payload.baseline.equity,cut));
   requestAnimationFrame(()=>{pc.timeScale().fitContent();ec.timeScale().fitContent()});
