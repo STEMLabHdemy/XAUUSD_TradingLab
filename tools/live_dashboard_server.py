@@ -145,6 +145,11 @@ def adaptation_page() -> FileResponse:
     return FileResponse(STATIC / "adaptation.html")
 
 
+@app.get("/adaptive-research")
+def adaptive_research_page() -> FileResponse:
+    return FileResponse(STATIC / "adaptive_research.html")
+
+
 @app.get("/api/research/leaderboard")
 def research_leaderboard() -> dict[str, Any]:
     """Read-only snapshot written by the continuous local search process."""
@@ -178,6 +183,17 @@ def research_adaptation() -> dict[str, Any]:
         return json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=503, detail=f"Risultato adattivo non leggibile: {exc}") from exc
+
+
+@app.get("/api/research/adaptive-leaderboard")
+def adaptive_leaderboard() -> dict[str, Any]:
+    directory = ROOT / "results" / "adaptive_search"
+    try:
+        result = json.loads((directory / "leaderboard.json").read_text(encoding="utf-8")) if (directory / "leaderboard.json").exists() else {"tested": 0, "leaderboard": []}
+        result["status"] = json.loads((directory / "status.json").read_text(encoding="utf-8")) if (directory / "status.json").exists() else {"message": "ricerca non avviata"}
+        return result
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"Classifica adattiva non leggibile: {exc}") from exc
 
 
 @app.get("/api/research/details/{candidate_id}")

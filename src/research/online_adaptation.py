@@ -41,13 +41,17 @@ def _records(frame: pd.DataFrame) -> list[dict]:
     return data.to_dict("records")
 
 
-def run(root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float = .55) -> dict:
+def run(
+    root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float = .55,
+    rolling_training_days: int = 120, params: dict | None = None, persist: bool = True,
+) -> dict:
     root = root.resolve(); end = pd.Timestamp.now(tz="UTC").floor("min")
     evaluation_start = end - pd.Timedelta(days=days)
     history_start = evaluation_start - pd.Timedelta(days=bootstrap_days)
     bars = load_history(root, history_start, end)
     features = FeatureEngine().transform(bars)
-    signals = structure_signals(bars, **PARAMS)
+    active_params = dict(PARAMS if params is None else params)
+    signals = structure_signals(bars, **active_params)
     frame = features.copy().reset_index(drop=True)
     frame["signal"] = signals.signal.to_numpy(); frame["structure_power"] = signals.power.to_numpy()
     frame["side"] = np.where(frame.signal.eq("BUY"), 1, np.where(frame.signal.eq("SELL"), -1, 0))
@@ -62,7 +66,7 @@ def run(root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float 
     day_series = pd.to_datetime(frame.datetime_utc, utc=True).dt.floor("D")
     eval_days = pd.date_range(evaluation_start.floor("D"), end.floor("D"), freq="D", tz="UTC")
     for day in eval_days:
-        train = valid & (day_series < day - pd.Timedelta(minutes=horizon)) & (day_series >= day - pd.Timedelta(days=120))
+        train = valid & (day_series < day - pd.Timedelta(minutes=horizon)) & (day_series >= day - pd.Timedelta(days=rolling_training_days))
         today = valid & (day_series == day)
         if train.sum() < 60 or today.sum() == 0 or frame.loc[train, "label"].nunique() < 2:
             continue
@@ -84,9 +88,9 @@ def run(root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float 
     adaptive = base.copy(); adaptive["signal"] = gated_signal
     plain = Backtester(cfg).run(baseline); gated = Backtester(cfg).run(adaptive)
     output = {"created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "method": {"name": "Daily rolling logistic gate", "params": PARAMS, "features": FEATURES,
+        "method": {"name": "Daily rolling logistic gate", "params": active_params, "features": FEATURES,
                    "label": "30-minute executable net outcome", "threshold": threshold,
-                   "bootstrap_days": bootstrap_days, "rolling_training_days": 120,
+                   "bootstrap_days": bootstrap_days, "rolling_training_days": rolling_training_days,
                    "warning": "Historical walk-forward experiment only; not approved for paper/live execution."},
         "period": {"start": evaluation_start.isoformat(), "end": end.isoformat(), "days": days},
         "coverage": {"base_events": int((base_signal != "HOLD").sum()), "predicted_events": int(base.probability.notna().sum()),
@@ -94,8 +98,9 @@ def run(root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float 
         "baseline": {"metrics": performance_metrics(plain.trades, plain.equity_curve, cfg.starting_capital), "trades": _records(plain.trades), "equity": _records(plain.equity_curve[["datetime_utc", "equity"]])},
         "adaptive": {"metrics": performance_metrics(gated.trades, gated.equity_curve, cfg.starting_capital), "trades": _records(gated.trades), "equity": _records(gated.equity_curve[["datetime_utc", "equity"]])},
         "candles": [{"time": int(pd.Timestamp(row.datetime_utc).timestamp()), "open": float(row.mid_open), "high": float(row.mid_high), "low": float(row.mid_low), "close": float(row.mid_close), "volume": float(getattr(row, "tick_volume", 0.0))} for row in base.itertuples(index=False)]}
-    target = root / "results" / "online_adaptation" / "result.json"; target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
+    if persist:
+        target = root / "results" / "online_adaptation" / "result.json"; target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
     return output
 
 
