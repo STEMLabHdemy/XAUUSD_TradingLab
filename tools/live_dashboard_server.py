@@ -196,6 +196,34 @@ def adaptive_leaderboard() -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"Classifica adattiva non leggibile: {exc}") from exc
 
 
+@app.get("/api/research/adaptive-details/{candidate_id}")
+def adaptive_candidate_details(candidate_id: str) -> dict[str, Any]:
+    """Replay and cache the exact adaptive configuration selected in the UI."""
+    directory = ROOT / "results" / "adaptive_search"
+    cached = directory / "details" / f"{candidate_id}.json"
+    try:
+        if cached.exists():
+            return json.loads(cached.read_text(encoding="utf-8"))
+        board = json.loads((directory / "leaderboard.json").read_text(encoding="utf-8"))
+        candidate = next(row for row in board.get("leaderboard", []) if row["id"] == candidate_id)
+        from src.research.online_adaptation import run as run_adaptive
+        result = run_adaptive(ROOT, days=int(board["period"]["days"]),
+                              threshold=float(candidate["config"]["threshold"]),
+                              rolling_training_days=int(candidate["config"]["rolling_training_days"]),
+                              params=candidate["config"]["params"], persist=False)
+        payload = {"candidate": candidate, **result}
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        temp = cached.with_name(f"{cached.stem}.{uuid4().hex}.tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temp.replace(cached)
+        return payload
+    except StopIteration as exc:
+        raise HTTPException(status_code=404, detail="Candidato non più nella top 100") from exc
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=503, detail=f"Replay adattivo fallito: {exc}") from exc
+
+
 @app.get("/api/research/details/{candidate_id}")
 def research_candidate_details(candidate_id: str) -> dict[str, Any]:
     """Replay one ranked configuration and cache its auditable chart payload."""
