@@ -44,8 +44,10 @@ def _records(frame: pd.DataFrame) -> list[dict]:
 def run(
     root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float = .55,
     rolling_training_days: int = 120, params: dict | None = None, persist: bool = True,
+    end: pd.Timestamp | None = None,
 ) -> dict:
-    root = root.resolve(); end = pd.Timestamp.now(tz="UTC").floor("min")
+    root = root.resolve(); end = pd.Timestamp.now(tz="UTC").floor("min") if end is None else pd.Timestamp(end)
+    end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
     evaluation_start = end - pd.Timedelta(days=days)
     history_start = evaluation_start - pd.Timedelta(days=bootstrap_days)
     bars = load_history(root, history_start, end)

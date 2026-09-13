@@ -196,6 +196,17 @@ def adaptive_leaderboard() -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"Classifica adattiva non leggibile: {exc}") from exc
 
 
+@app.get("/api/research/adaptive-validation")
+def adaptive_validation() -> dict[str, Any]:
+    directory = ROOT / "results" / "adaptive_search"
+    try:
+        result = json.loads((directory / "validation.json").read_text(encoding="utf-8")) if (directory / "validation.json").exists() else {"validated": 0, "results": []}
+        result["status"] = json.loads((directory / "validation_status.json").read_text(encoding="utf-8")) if (directory / "validation_status.json").exists() else {"message": "validazione non avviata"}
+        return result
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"Validazione adattiva non leggibile: {exc}") from exc
+
+
 @app.get("/api/research/adaptive-details/{candidate_id}")
 def adaptive_candidate_details(candidate_id: str) -> dict[str, Any]:
     """Replay and cache the exact adaptive configuration selected in the UI."""
