@@ -150,6 +150,11 @@ def adaptive_research_page() -> FileResponse:
     return FileResponse(STATIC / "adaptive_research.html")
 
 
+@app.get("/robustness")
+def robustness_page() -> FileResponse:
+    return FileResponse(STATIC / "robustness.html")
+
+
 @app.get("/api/research/leaderboard")
 def research_leaderboard() -> dict[str, Any]:
     """Read-only snapshot written by the continuous local search process."""
@@ -205,6 +210,17 @@ def adaptive_validation() -> dict[str, Any]:
         return result
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=503, detail=f"Validazione adattiva non leggibile: {exc}") from exc
+
+
+@app.get("/api/research/adaptive-robustness")
+def adaptive_robustness() -> dict[str, Any]:
+    directory = ROOT / "results" / "adaptive_robustness"
+    try:
+        result = json.loads((directory / "result.json").read_text(encoding="utf-8")) if (directory / "result.json").exists() else {"ranking": [], "runs": []}
+        result["status"] = json.loads((directory / "status.json").read_text(encoding="utf-8")) if (directory / "status.json").exists() else {"message": "studio non avviato"}
+        return result
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"Studio robustezza non leggibile: {exc}") from exc
 
 
 @app.get("/api/research/adaptive-details/{candidate_id}")

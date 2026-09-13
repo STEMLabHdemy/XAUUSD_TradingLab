@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Robustezza adaptive XAUUSD</title><link rel="stylesheet" href="/static/style.css?v=12">
+</head>
+<body>
+  <header><div><strong>Stress test robustezza</strong><span>Quattro blocchi temporali indipendenti · slippage 1× / 2× / 3× · nessun ordine al broker</span></div>
+    <div class="header-actions"><a href="/adaptive-research">Ricerca adattiva</a><a href="/adaptation?candidate=A000214">Replay A000214</a><div id="status">Caricamento…</div></div>
+  </header>
+  <main class="lab">
+    <section class="progress"><b>Test predefinito, non una nuova ottimizzazione</b><small>A000214 e A000913 vengono rieseguiti senza modificare parametri. Un risultato positivo qui è soltanto un filtro di ricerca, non un segnale operativo.</small></section>
+    <div class="metrics" id="summary"></div>
+    <h2>Classifica per stabilità</h2>
+    <div class="table-wrap"><table><thead><tr><th>Candidato</th><th>Blocchi + / 4</th><th>Mediana PnL</th><th>Peggiore PnL</th><th>PF mediano</th><th>Mediana con costi 2×–3×</th><th>Verdetto</th></tr></thead><tbody id="ranking"><tr><td colspan="7">Studio in attesa…</td></tr></tbody></table></div>
+    <h2>Dettaglio per blocco e costi</h2>
+    <div class="table-wrap"><table><thead><tr><th>Candidato</th><th>Blocco</th><th>Fine periodo</th><th>Costi</th><th>PnL adaptive</th><th>PF</th><th>Trade</th><th>DD</th></tr></thead><tbody id="runs"><tr><td colspan="8">Nessun replay completato.</td></tr></tbody></table></div>
+  </main>
+  <script src="/static/robustness.js?v=1"></script>
+</body>
+</html>

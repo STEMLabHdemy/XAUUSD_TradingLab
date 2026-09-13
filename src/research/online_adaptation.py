@@ -44,8 +44,10 @@ def _records(frame: pd.DataFrame) -> list[dict]:
 def run(
     root: Path, days: int = 90, bootstrap_days: int = 180, threshold: float = .55,
     rolling_training_days: int = 120, params: dict | None = None, persist: bool = True,
-    end: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None, cost_multiplier: float = 1.0,
 ) -> dict:
+    if cost_multiplier <= 0:
+        raise ValueError("cost_multiplier deve essere positivo")
     root = root.resolve(); end = pd.Timestamp.now(tz="UTC").floor("min") if end is None else pd.Timestamp(end)
     end = end.tz_localize("UTC") if end.tzinfo is None else end.tz_convert("UTC")
     evaluation_start = end - pd.Timedelta(days=days)
@@ -91,7 +93,8 @@ def run(
     gated_signal = base_signal.where(base.probability.ge(threshold), "HOLD")
     cfg = BacktestConfig(stop_loss_price=None, take_profit_price=None, max_holding_minutes=None,
         max_daily_trades=2, cooldown_minutes=10, atr_stop_multiple=2.0,
-        atr_break_even_r=1.25, atr_trailing_multiple=2.5)
+        atr_break_even_r=1.25, atr_trailing_multiple=2.5,
+        slippage_price_per_side=.05 * cost_multiplier)
     baseline = base.copy(); baseline["signal"] = base_signal
     adaptive = base.copy(); adaptive["signal"] = gated_signal
     plain = Backtester(cfg).run(baseline); gated = Backtester(cfg).run(adaptive)
@@ -99,6 +102,7 @@ def run(
         "method": {"name": "Daily rolling logistic gate", "params": active_params, "features": FEATURES,
                    "label": "30-minute executable net outcome", "threshold": threshold,
                    "bootstrap_days": bootstrap_days, "rolling_training_days": rolling_training_days,
+                   "cost_multiplier": cost_multiplier,
                    "warning": "Historical walk-forward experiment only; not approved for paper/live execution."},
         "period": {"start": evaluation_start.isoformat(), "end": end.isoformat(), "days": days},
         "coverage": {"base_events": int((base_signal != "HOLD").sum()), "predicted_events": int(base.probability.notna().sum()),
