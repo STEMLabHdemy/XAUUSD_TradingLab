@@ -140,6 +140,11 @@ def research_page() -> FileResponse:
     return FileResponse(STATIC / "research.html")
 
 
+@app.get("/adaptation")
+def adaptation_page() -> FileResponse:
+    return FileResponse(STATIC / "adaptation.html")
+
+
 @app.get("/api/research/leaderboard")
 def research_leaderboard() -> dict[str, Any]:
     """Read-only snapshot written by the continuous local search process."""
@@ -162,6 +167,17 @@ def research_validation() -> dict[str, Any]:
         return payload
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=503, detail=f"Snapshot validazione non leggibile: {exc}") from exc
+
+
+@app.get("/api/research/adaptation")
+def research_adaptation() -> dict[str, Any]:
+    target = ROOT / "results" / "online_adaptation" / "result.json"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Replay adattivo non ancora eseguito")
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=503, detail=f"Risultato adattivo non leggibile: {exc}") from exc
 
 
 @app.get("/api/research/details/{candidate_id}")
