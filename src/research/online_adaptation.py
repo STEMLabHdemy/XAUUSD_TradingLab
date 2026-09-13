@@ -51,6 +51,12 @@ def run(
     evaluation_start = end - pd.Timedelta(days=days)
     history_start = evaluation_start - pd.Timedelta(days=bootstrap_days)
     bars = load_history(root, history_start, end)
+    # Some broker exports contain empty M1 rows around session transitions.
+    # Never let a non-finite quote enter indicators, the backtest, or charts.
+    quote_columns = [column for column in ("mid_open", "mid_high", "mid_low", "mid_close") if column in bars.columns]
+    valid_quotes = np.isfinite(bars[quote_columns].to_numpy(dtype=float)).all(axis=1)
+    valid_quotes &= (bars["mid_low"].to_numpy(dtype=float) > 0) & (bars["mid_high"].to_numpy(dtype=float) >= bars["mid_low"].to_numpy(dtype=float))
+    bars = bars.loc[valid_quotes].copy().reset_index(drop=True)
     features = FeatureEngine().transform(bars)
     active_params = dict(PARAMS if params is None else params)
     signals = structure_signals(bars, **active_params)

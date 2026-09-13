@@ -20,7 +20,10 @@ function visualLine(source,cut){
   return result;
 }
 function render(){
-  let n=windowSize(),source=n?payload.candles.slice(-n):payload.candles,cut=source[0].time,visual=visualCandles(source),mapTime=time=>visual.timeMap.get(time)||visual.bars[0].time;
+  const clean=payload.candles.filter(bar=>[bar.open,bar.high,bar.low,bar.close].every(Number.isFinite) && bar.low>0 && bar.high>=bar.low);
+  let n=windowSize(),source=n?clean.slice(-n):clean;
+  if(!source.length)throw Error('Nessuna candela valida nel periodo selezionato');
+  let cut=source[0].time,visual=visualCandles(source),mapTime=time=>visual.timeMap.get(time)||visual.bars[0].time;
   ps.setData(visual.bars);
   const rawMarkers=payload.adaptive.trades.filter(t=>epoch(t.exit_time)>=cut).flatMap(t=>[
     {time:mapTime(epoch(t.entry_time)),position:t.side==='LONG'?'belowBar':'aboveBar',color:t.side==='LONG'?'#22c55e':'#ef4444',shape:t.side==='LONG'?'arrowUp':'arrowDown',text:t.side==='LONG'?'BUY':'SELL'},
