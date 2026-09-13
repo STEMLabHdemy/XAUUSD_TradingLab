@@ -70,7 +70,13 @@ def _summary(rows: list[dict], challenger: dict) -> dict:
     profitable = sum(pnl > 0 for pnl in pnls)
     # This is a research triage label, never an approval for a live account.
     median_stress = statistics.median(stress_pnls) if stress_pnls else None
-    grade = "DA APPROFONDIRE" if len(normal) == FOLDS and len(stress) == FOLDS * 2 and profitable >= 3 and statistics.median(pfs) > 1 and median_stress > 0 else "IN CORSO"
+    complete = len(normal) == FOLDS and len(stress) == FOLDS * 2
+    if not complete:
+        grade = "IN CORSO"
+    elif profitable >= 3 and statistics.median(pfs) > 1 and median_stress > 0:
+        grade = "DA APPROFONDIRE"
+    else:
+        grade = "NON ROBUSTO"
     return {
         "id": challenger["id"], "label": challenger["label"], "source_candidate": challenger["source_candidate"],
         "config": {key: challenger[key] for key in ("params", "threshold", "rolling_training_days")},
@@ -126,6 +132,16 @@ def run_study(root: Path, days: int = 90, pause_seconds: float = 0.2) -> None:
                 _write(status_path, {"pid": os.getpid(), "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                                      "completed": len(existing), "total": total, "message": f"stress test {key}"})
                 time.sleep(pause_seconds)
+    # Also refresh a resumed/completed study: no replay is repeated, but the
+    # derived robustness verdict is recalculated from the saved runs.
+    ordered = list(existing.values())
+    by_id = {ident: [row for row in ordered if row["challenger_id"] == ident] for ident in CHALLENGERS}
+    ranking = sorted((_summary(by_id[ident], {"id": ident, **CHALLENGERS[ident]}) for ident in CHALLENGERS),
+                     key=lambda item: (item["grade"] == "DA APPROFONDIRE", item["median_pnl"] or float("-inf")), reverse=True)
+    _write(result_path, {"version": VERSION, "updated_at_utc": datetime.now(timezone.utc).isoformat(), "days_per_fold": days,
+                         "latest_data_utc": latest.isoformat(), "folds": folds, "cost_multipliers": COST_MULTIPLIERS,
+                         "runs": ordered, "ranking": ranking,
+                         "note": "Configurazioni fissate prima del test; i costi sono stress di slippage. Ricerca storica, non approvazione live."})
     _write(status_path, {"pid": os.getpid(), "updated_at_utc": datetime.now(timezone.utc).isoformat(),
                          "completed": len(existing), "total": total, "message": "studio robustezza completato"})
 
