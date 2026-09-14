@@ -81,7 +81,7 @@ class IndicatorPaperRuntime:
             current = FeatureEngine().transform(bars).iloc[[-1]][self.A913_FEATURES].replace([np.inf, -np.inf], np.nan)
             if current.notna().all(axis=None): probability = float(self._gate_model.predict_proba(self._gate_scaler.transform(current.to_numpy(float)))[0, 1])
         signal = candidate if probability >= .55 else "HOLD"
-        return LiveInference(True, "A000913-adaptive-paper", None, probability, timestamp, signal, candidate,
+        return LiveInference(True, "A000913-adaptive-paper", None, probability, timestamp, candidate, signal,
                              f"{row.reason}; gate={probability:.1%}", signal_id=int(row.timestamp),
                              power=None if pd.isna(row.power) else float(row.power))
 
