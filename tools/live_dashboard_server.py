@@ -13,7 +13,7 @@ from uuid import uuid4
 import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,8 +121,11 @@ def _number(value: Any) -> float | None:
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC / "indicators.html")
+def index() -> RedirectResponse:
+    # The root serves the indicator dashboard.  The page JavaScript selects its
+    # data API from the URL, so keeping it at / caused it to query old model
+    # ledgers rather than the I42/I43 paper accounts.
+    return RedirectResponse(url="/indicators", status_code=307)
 
 
 @app.get("/indicators")
