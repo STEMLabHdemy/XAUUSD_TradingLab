@@ -10,7 +10,6 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from src.backtest.lab import load_history
 from src.features import FeatureEngine
 from src.live.inference import LiveInference
 from src.live.mt5_client import MarketTick
@@ -53,6 +52,9 @@ class IndicatorPaperRuntime:
 
     def _refresh_gate(self, day: pd.Timestamp) -> None:
         """Fit only on labels available before this UTC day; never on live-day outcomes."""
+        # Imported lazily to avoid the historical lab's optional paper catalog
+        # importing this runtime while Python is still initialising it.
+        from src.backtest.lab import load_history
         history = load_history(self.root, day - pd.Timedelta(days=310), day)
         features = FeatureEngine().transform(history).reset_index(drop=True)
         signals = structure_signals(history, **self.A913_PARAMS)
