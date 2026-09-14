@@ -27,9 +27,18 @@ def _write_status(path: Path, run_id: str, *, message: str) -> None:
     }
     # A process-specific temporary name avoids a stale duplicate process (or a
     # just-restarted watchdog) colliding with the current writer on Windows.
-    temporary = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    # Windows can briefly lock the status JSON while the local dashboard reads
+    # it.  A heartbeat must never kill the paper engine for that benign race.
+    for attempt in range(8):
+        temporary = path.with_name(f"{path.stem}.{os.getpid()}.{attempt}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+            return
+        except PermissionError:
+            temporary.unlink(missing_ok=True)
+            time.sleep(.05 * (attempt + 1))
+    raise PermissionError(f"Heartbeat non scrivibile: {path}")
 
 
 def run(project_root: Path, interval_seconds: float) -> None:
