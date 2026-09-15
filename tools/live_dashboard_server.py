@@ -64,7 +64,7 @@ def _load_indicator_states() -> tuple[str, dict[str, dict[str, Any]]]:
     for path in directory.glob("structure_v1_*/state.json"):
         state = json.loads(path.read_text(encoding="utf-8"))
         strategy_id = str(state.get("config", {}).get("strategy_id", ""))
-        if state.get("run_id") == run_id and strategy_id in {"I42", "I43"}:
+        if state.get("run_id") == run_id and strategy_id in {"I42", "I43", "I44", "I45"}:
             states[str(state["model"])] = state
     return run_id, states
 
