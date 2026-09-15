@@ -479,12 +479,23 @@ def snapshot(strategy: str | None = None, source: str = "model", window: str = "
                 "average_power": (sum(trade_powers) / len(trade_powers)) if trade_powers else None,
                 "powered_trades": len(trade_powers),
             })
+        selected_positions = []
+        for position in account.get("positions", []):
+            side = str(position.get("side", "")); quantity = _number(position.get("quantity")) or 0.0
+            raw_exit = _number(tick["bid"] if side == "LONG" else tick["ask"]) or 0.0
+            raw_entry = _number(position.get("raw_entry_price")) or 0.0
+            direction = 1.0 if side == "LONG" else -1.0
+            config = account.get("config", {})
+            costs = (_number(position.get("entry_costs")) or 0.0) + quantity * ((_number(config.get("slippage_price_per_side")) or 0.0) + (_number(config.get("commission_per_unit_per_side")) or 0.0))
+            selected_positions.append({**position, "open_pnl": direction * (raw_exit - raw_entry) * quantity - costs})
+        activity = {"positions": selected_positions, "trades": list(account.get("trades") or [])[-30:],
+                    "events": list(account.get("events") or [])[-60:]}
         return {
             "tick": tick,
             "candles": candles, "markers": markers, "levels": levels, "overlays": overlays,
             "selected": selected, "strategies": account_names,
             "cards": cards, "run_id": run_id, "inference": _latest_inference() if source == "model" else None,
-            "paper_status": _paper_status(), "chart_window": window,
+            "paper_status": _paper_status(), "chart_window": window, "activity": _json_safe(activity),
         }
     except Exception as exc:  # Browser gets the actionable failure, server stays alive.
         traceback.print_exc()
